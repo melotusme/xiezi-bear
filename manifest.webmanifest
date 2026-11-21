@@ -1,0 +1,20 @@
+{
+  "name": "小熊写字本 · 学写我的名字",
+  "short_name": "小熊写字本",
+  "description": "卡通萌系互动写字本，带规范笔顺动画、自然人声报笔画与描红练习，教小朋友学写自己的名字。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#E3F4FF",
+  "theme_color": "#E3F4FF",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

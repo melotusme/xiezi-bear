@@ -40,6 +40,16 @@
   const STAR_FILLED_SVG = `<svg viewBox="0 0 24 24" fill="#FFD15C" stroke="#E0A116" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.7 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/></svg>`;
   const STAR_EMPTY_SVG = `<svg viewBox="0 0 24 24" fill="#FFF7E2" stroke="#E8D2B5" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.7 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2"/></svg>`;
 
+  const TOUCH_BASE_LENIENCY = 1.32;
+  const DESKTOP_BASE_LENIENCY = 1.18;
+  const TOUCH_LONG_VERTICAL_LENIENCY = 1.65;
+  const DESKTOP_LONG_VERTICAL_LENIENCY = 1.5;
+  const VERTICAL_STROKE_NAMES = new Set(['竖', '竖钩', '竖提', '弯钩']);
+
+  function isCoarsePointer() {
+    return Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  }
+
   const state = {
     nameChars: ['王', '小', '明'],
     activeIndex: 0,
@@ -58,7 +68,8 @@
     resumeIndex: 0,
     chipBufferMode: false,
     showcaseWriters: [],
-    savedNames: []
+    savedNames: [],
+    lastBoardWidth: 0
   };
 
   // DOM 引用
@@ -147,12 +158,20 @@
     }
   }
 
-  // Web Audio 轻音效
+  // Web Audio 轻音效（含移动端 Safari / 微信首次触摸静音解锁）
   let audioCtx = null;
+  let audioUnlockBound = false;
+
   function getAudioCtx() {
     if (!audioCtx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) audioCtx = new Ctx();
+      if (Ctx) {
+        try {
+          audioCtx = new Ctx();
+        } catch (_) {
+          audioCtx = null;
+        }
+      }
     }
     if (audioCtx && audioCtx.state === 'suspended') {
       audioCtx.resume().catch(() => {});
@@ -160,22 +179,64 @@
     return audioCtx;
   }
 
+  function setupMobileAudioUnlock() {
+    if (audioUnlockBound || typeof document === 'undefined') return;
+    audioUnlockBound = true;
+
+    const unlock = () => {
+      try {
+        const ctx = getAudioCtx();
+        if (!ctx) return;
+        const playSilentTick = () => {
+          try {
+            const buf = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start(0);
+          } catch (_) {}
+        };
+        if (ctx.state === 'suspended') {
+          ctx.resume()
+            .then(() => {
+              playSilentTick();
+              if (ctx.state === 'running') cleanup();
+            })
+            .catch(() => {});
+        } else {
+          playSilentTick();
+          if (ctx.state === 'running') cleanup();
+        }
+      } catch (_) {}
+    };
+
+    const cleanup = () => {
+      document.removeEventListener('pointerdown', unlock, { capture: true });
+      document.removeEventListener('touchstart', unlock, { capture: true });
+    };
+
+    document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    document.addEventListener('touchstart', unlock, { capture: true, passive: true });
+  }
+
   function playTone(freq, duration = 0.12, type = 'sine', gainVal = 0.12, delay = 0) {
     if (!state.soundEnabled) return;
     const ctx = getAudioCtx();
     if (!ctx) return;
-    const now = ctx.currentTime + delay;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type;
-    osc.frequency.setValueAtTime(freq, now);
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.exponentialRampToValueAtTime(gainVal, now + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + duration + 0.02);
+    try {
+      const now = ctx.currentTime + delay;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(gainVal, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+    } catch (_) {}
   }
 
   function playCorrectSound() {
@@ -239,7 +300,10 @@
         };
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
-          p.catch(done);
+          p.catch(() => {
+            if (currentAudio === audio) currentAudio = null;
+            done();
+          });
         }
         setTimeout(done, timeoutMs);
       } catch (_) {
@@ -312,22 +376,30 @@
   }
 
   function updatePlayButtonUI() {
+    const coarse = isCoarsePointer();
+    const keyHint = coarse ? '' : ' (空格)';
+    if (el.playAnimBtn) {
+      el.playAnimBtn.title = coarse ? '点击播放或暂停' : '按空格键也可播放或暂停';
+    }
     if (state.animStatus === 'playing') {
       el.playIconSvg.classList.add('hidden');
       el.pauseIconSvg.classList.remove('hidden');
-      el.playBtnText.textContent = state.pauseRequested ? '写完本笔停...' : '暂停 (空格)';
+      el.playBtnText.textContent = state.pauseRequested ? '写完本笔停...' : `暂停${keyHint}`;
     } else if (state.animStatus === 'paused') {
       el.playIconSvg.classList.remove('hidden');
       el.pauseIconSvg.classList.add('hidden');
-      el.playBtnText.textContent = '继续看 (空格)';
+      el.playBtnText.textContent = `继续看${keyHint}`;
     } else {
       el.playIconSvg.classList.remove('hidden');
       el.pauseIconSvg.classList.add('hidden');
-      el.playBtnText.textContent = '再看一遍 (空格)';
+      el.playBtnText.textContent = `再看一遍${keyHint}`;
     }
   }
 
+  let celebrateTimer = null;
+
   function cancelSpeechAndAnim() {
+    clearTimeout(celebrateTimer);
     state.animToken += 1;
     state.animStatus = 'idle';
     state.pauseRequested = false;
@@ -455,6 +527,256 @@
     }, 1800);
   }
 
+  // 加密长直线段的中轴采样点，避免 HanziWriter 计算平均距离时因长竖笔采样稀疏产生误判
+  function densifyMedianPoints(pts, maxStep = 45) {
+    if (!Array.isArray(pts) || pts.length < 2) return pts;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length; i += 1) {
+      const [x0, y0] = pts[i - 1];
+      const [x1, y1] = pts[i];
+      const segLen = Math.hypot(x1 - x0, y1 - y0);
+      if (segLen > maxStep) {
+        const steps = Math.ceil(segLen / maxStep);
+        for (let s = 1; s < steps; s += 1) {
+          const t = s / steps;
+          out.push([
+            Math.round((x0 + (x1 - x0) * t) * 10) / 10,
+            Math.round((y0 + (y1 - y0) * t) * 10) / 10
+          ]);
+        }
+      }
+      out.push(pts[i]);
+    }
+    return out;
+  }
+
+  function prepareWriterCharData(charData) {
+    if (!charData || !Array.isArray(charData.medians)) return charData;
+    return {
+      ...charData,
+      medians: charData.medians.map((m) => densifyMedianPoints(m, 45))
+    };
+  }
+
+  // 识别较长的竖向笔画（竖 / 竖钩 / 竖提 / 弯钩，或 Y 轴大幅向下且以竖为主的笔画）
+  function analyzeVerticalStroke(pts, strokeName = '') {
+    if (!Array.isArray(pts) || pts.length < 2) {
+      return { isLongVertical: false };
+    }
+    const start = pts[0];
+    const end = pts[pts.length - 1];
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+
+    let minYIdx = 0;
+    for (let i = 1; i < pts.length; i += 1) {
+      if (pts[i][1] <= pts[minYIdx][1]) minYIdx = i;
+    }
+    const bottom = pts[minYIdx];
+    const shaftDx = bottom[0] - start[0];
+    const shaftDy = bottom[1] - start[1];
+
+    let shaftMinX = Infinity;
+    let shaftMaxX = -Infinity;
+    for (let i = 0; i <= minYIdx; i += 1) {
+      shaftMinX = Math.min(shaftMinX, pts[i][0]);
+      shaftMaxX = Math.max(shaftMaxX, pts[i][0]);
+    }
+    const shaftWidthX = shaftMaxX - shaftMinX;
+
+    let tailLen = 0;
+    for (let i = minYIdx + 1; i < pts.length; i += 1) {
+      tailLen += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    }
+
+    const namedVertical = VERTICAL_STROKE_NAMES.has(strokeName);
+    const hasLongDownwardSpan = dy <= -260 || shaftDy <= -280 || (namedVertical && shaftDy <= -235);
+    const predominantlyVertical =
+      Math.abs(dy) > 2.0 * Math.abs(dx) &&
+      Math.abs(shaftDy) > 2.4 * Math.abs(shaftDx);
+    const narrowShaft = shaftWidthX <= Math.max(110, Math.abs(shaftDy) * 0.22);
+    const compactTail = tailLen <= Math.abs(shaftDy) * 0.42;
+
+    const isLongVertical = Boolean(
+      hasLongDownwardSpan && predominantlyVertical && narrowShaft && compactTail
+    );
+
+    return {
+      isLongVertical,
+      start,
+      end,
+      bottom,
+      dx,
+      dy,
+      shaftDx,
+      shaftDy,
+      shaftWidthX,
+      tailLen,
+      denseShaft: isLongVertical ? densifyMedianPoints(pts.slice(0, minYIdx + 1), 35) : null
+    };
+  }
+
+  function getBaseLeniency(coarse = isCoarsePointer()) {
+    return coarse ? TOUCH_BASE_LENIENCY : DESKTOP_BASE_LENIENCY;
+  }
+
+  function getStrokeLeniency(charData, ch, strokeIdx, coarse = isCoarsePointer()) {
+    const median = charData && charData.medians && charData.medians[strokeIdx];
+    const strokeName = getStrokeName(ch, strokeIdx);
+    const vertInfo = analyzeVerticalStroke(median, strokeName);
+    if (vertInfo.isLongVertical) {
+      return coarse ? TOUCH_LONG_VERTICAL_LENIENCY : DESKTOP_LONG_VERTICAL_LENIENCY;
+    }
+    return getBaseLeniency(coarse);
+  }
+
+  // 针对小朋友手指写长竖笔画（收笔略短、轻微弧度、竖钩/竖提小钩略轻）做专项宽容判定，
+  // 同时严格拦截横画、自下而上倒插笔、撇捺斜画、短点误触或偏离走廊位置的错笔。
+  function matchesLongVerticalFingerStroke(userPoints, vertInfo, coarse = isCoarsePointer()) {
+    if (!vertInfo || !vertInfo.isLongVertical || !Array.isArray(userPoints) || userPoints.length < 2) {
+      return false;
+    }
+    const pts = [userPoints[0]];
+    for (let i = 1; i < userPoints.length; i += 1) {
+      const prev = pts[pts.length - 1];
+      if (userPoints[i].x !== prev.x || userPoints[i].y !== prev.y) {
+        pts.push(userPoints[i]);
+      }
+    }
+    if (pts.length < 2) return false;
+
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const overallDy = last.y - first.y;
+    if (overallDy >= -120) return false;
+
+    let userMinYIdx = 0;
+    for (let i = 1; i < pts.length; i += 1) {
+      if (pts[i].y <= pts[userMinYIdx].y) userMinYIdx = i;
+    }
+    const userBottom = pts[userMinYIdx];
+    const userShaftDx = userBottom.x - first.x;
+    const userShaftDy = userBottom.y - first.y;
+    const targetShaftSpan = Math.abs(vertInfo.shaftDy);
+
+    const minRequiredDownward = Math.max(135, targetShaftSpan * (coarse ? 0.45 : 0.52));
+    if (-userShaftDy < minRequiredDownward) return false;
+
+    if (Math.abs(userShaftDy) < 2.25 * Math.abs(userShaftDx)) return false;
+
+    let shaftMinX = Infinity;
+    let shaftMaxX = -Infinity;
+    let upwardBacktrack = 0;
+    for (let i = 0; i <= userMinYIdx; i += 1) {
+      shaftMinX = Math.min(shaftMinX, pts[i].x);
+      shaftMaxX = Math.max(shaftMaxX, pts[i].x);
+      if (i > 0) {
+        const stepDy = pts[i].y - pts[i - 1].y;
+        if (stepDy > 0) upwardBacktrack += stepDy;
+      }
+    }
+    if (shaftMaxX - shaftMinX > Math.max(145, Math.abs(userShaftDy) * 0.34)) return false;
+    if (upwardBacktrack > Math.max(45, Math.abs(userShaftDy) * 0.16)) return false;
+
+    let userTailLen = 0;
+    for (let i = userMinYIdx + 1; i < pts.length; i += 1) {
+      userTailLen += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    }
+    const maxAllowedTail = vertInfo.tailLen > 30
+      ? Math.max(220, vertInfo.tailLen * 1.8)
+      : Math.max(95, Math.abs(userShaftDy) * 0.22);
+    if (userTailLen > maxAllowedTail) return false;
+
+    const [targetStartX, targetStartY] = vertInfo.start;
+    const targetBottomY = vertInfo.bottom[1];
+    const maxStartXOffset = coarse ? 190 : 160;
+    const maxStartAbove = coarse ? 175 : 145;
+    const maxStartBelow = Math.max(coarse ? 205 : 170, targetShaftSpan * 0.32);
+
+    if (Math.abs(first.x - targetStartX) > maxStartXOffset) return false;
+    if (first.y > targetStartY + maxStartAbove || first.y < targetStartY - maxStartBelow) return false;
+    if (userBottom.y < targetBottomY - (coarse ? 210 : 175)) return false;
+
+    const denseShaft = vertInfo.denseShaft || [vertInfo.start, vertInfo.bottom];
+    let distSum = 0;
+    for (let i = 0; i <= userMinYIdx; i += 1) {
+      const ux = pts[i].x;
+      const uy = pts[i].y;
+      let best = Infinity;
+      for (let j = 0; j < denseShaft.length; j += 1) {
+        const d = Math.hypot(ux - denseShaft[j][0], uy - denseShaft[j][1]);
+        if (d < best) best = d;
+      }
+      distSum += best;
+    }
+    const avgShaftDist = distSum / (userMinYIdx + 1);
+    if (avgShaftDist > (coarse ? 165 : 138)) return false;
+
+    return true;
+  }
+
+  function isNonVerticalWrongAttempt(userPoints, vertInfo) {
+    if (!vertInfo || !vertInfo.isLongVertical || !Array.isArray(userPoints) || userPoints.length < 2) {
+      return false;
+    }
+    const first = userPoints[0];
+    const last = userPoints[userPoints.length - 1];
+    const overallDy = last.y - first.y;
+    if (overallDy >= -95) return true;
+
+    let minYIdx = 0;
+    for (let i = 1; i < userPoints.length; i += 1) {
+      if (userPoints[i].y <= userPoints[minYIdx].y) minYIdx = i;
+    }
+    const bottom = userPoints[minYIdx];
+    const shaftDx = bottom.x - first.x;
+    const shaftDy = bottom.y - first.y;
+    if (Math.abs(shaftDy) < 2.0 * Math.abs(shaftDx)) return true;
+    if (Math.abs(first.x - vertInfo.start[0]) > 210) return true;
+    return false;
+  }
+
+  function attachLongVerticalQuizHook(writer, charData, ch) {
+    const quiz = writer && writer._quiz;
+    if (!quiz || quiz._longVerticalHooked || typeof quiz.endUserStroke !== 'function') return;
+    quiz._longVerticalHooked = true;
+
+    const origEndUserStroke = quiz.endUserStroke;
+    quiz.endUserStroke = function patchedEndUserStroke() {
+      const activeStroke = this._userStroke;
+      const idx = this._currentStrokeIndex;
+      const coarse = isCoarsePointer();
+
+      if (this._options && charData && charData.medians && idx >= 0 && idx < charData.medians.length) {
+        const strokeName = getStrokeName(ch, idx);
+        const vertInfo = analyzeVerticalStroke(charData.medians[idx], strokeName);
+        if (vertInfo.isLongVertical && activeStroke && Array.isArray(activeStroke.points)) {
+          if (matchesLongVerticalFingerStroke(activeStroke.points, vertInfo, coarse)) {
+            this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse);
+            const prevAutoPass = this._options.markStrokeCorrectAfterMisses;
+            this._options.markStrokeCorrectAfterMisses = 1;
+            try {
+              return origEndUserStroke.call(this);
+            } finally {
+              this._options.markStrokeCorrectAfterMisses = prevAutoPass;
+            }
+          }
+          if (isNonVerticalWrongAttempt(activeStroke.points, vertInfo)) {
+            const prevLeniency = this._options.leniency;
+            this._options.leniency = 0.95;
+            try {
+              return origEndUserStroke.call(this);
+            } finally {
+              this._options.leniency = prevLeniency;
+            }
+          }
+        }
+        this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse);
+      }
+      return origEndUserStroke.call(this);
+    };
+  }
+
   // 笔画数据加载器
   function charDataLoader(char, onComplete, onError) {
     if (window.BUILTIN_STROKE_DATA && window.BUILTIN_STROKE_DATA[char]) {
@@ -470,6 +792,14 @@
       .catch((err) => {
         if (onError) onError(err);
       });
+  }
+
+  function writerCharDataLoader(char, onComplete, onError) {
+    charDataLoader(
+      char,
+      (data) => onComplete(prepareWriterCharData(data)),
+      onError
+    );
   }
 
   function getCharDataAsync(char) {
@@ -536,6 +866,7 @@
 
   function closeNamePicker() {
     el.namePickerModal.classList.add('hidden');
+    syncBoardSizeIfChanged();
   }
 
   function renderSavedNames() {
@@ -778,12 +1109,20 @@
     return el.hanziTarget.clientWidth || 320;
   }
 
+  function getDrawingWidth(coarse = isCoarsePointer()) {
+    return coarse ? 26 : 20;
+  }
+
   function getAnimSpeedValue() {
     return state.isSlow ? 0.7 : 1.5;
   }
 
-  // 加载当前选中的汉字
-  async function loadActiveCharacter() {
+  // 加载当前选中的汉字（支持尺寸变化重绘时保留测验进度）
+  async function loadActiveCharacter(options = {}) {
+    const resumeStrokeIdx =
+      typeof options.resumeStrokeIdx === 'number' && options.resumeStrokeIdx > 0
+        ? options.resumeStrokeIdx
+        : 0;
     cancelSpeechAndAnim();
     state.loadToken += 1;
     const myToken = state.loadToken;
@@ -807,10 +1146,14 @@
 
       el.hanziTarget.innerHTML = '';
       const size = getBoardSize();
+      state.lastBoardWidth = size;
+      const coarse = isCoarsePointer();
+      const boardPadding = Math.round(Math.max(14, Math.min(20, size * 0.055)));
+
       state.writer = HanziWriter.create(el.hanziTarget, ch, {
         width: size,
         height: size,
-        padding: 18,
+        padding: boardPadding,
         showOutline: state.mode === 'watch' ? true : state.showOutline,
         showCharacter: state.mode === 'watch',
         strokeAnimationSpeed: getAnimSpeedValue(),
@@ -819,11 +1162,12 @@
         outlineColor: '#EBD9C5',
         radicalColor: '#FF7477',
         drawingColor: '#5CB8F5',
-        drawingWidth: 18,
+        drawingWidth: getDrawingWidth(coarse),
+        leniency: getBaseLeniency(coarse),
         highlightColor: '#FF7477',
         showHintAfterMisses: 2,
         highlightOnComplete: true,
-        charDataLoader
+        charDataLoader: writerCharDataLoader
       });
 
       const createdSvg = el.hanziTarget.querySelector('svg');
@@ -834,7 +1178,7 @@
       if (state.mode === 'watch') {
         playFullAnimation();
       } else {
-        startQuiz();
+        startQuiz(resumeStrokeIdx);
       }
     } catch (_) {
       el.strokeProgressLabel.textContent = '暂无笔画数据';
@@ -902,7 +1246,11 @@
           state.animStatus = 'paused';
           state.resumeIndex = i + 1;
           el.strokeProgressLabel.textContent = `已暂停 · 已写 ${i + 1} / ${total} 画`;
-          setBearMood('idle', '先歇一会儿', '按空格或“继续看”，接着看下一笔！');
+          setBearMood(
+            'idle',
+            '先歇一会儿',
+            isCoarsePointer() ? '点“继续看”，接着看下一笔！' : '按空格或“继续看”，接着看下一笔！'
+          );
         }
         updatePlayButtonUI();
         return;
@@ -916,7 +1264,11 @@
           state.animStatus = 'paused';
           state.resumeIndex = i + 1;
           el.strokeProgressLabel.textContent = `已暂停 · 已写 ${i + 1} / ${total} 画`;
-          setBearMood('idle', '先歇一会儿', '按空格或“继续看”，接着看下一笔！');
+          setBearMood(
+            'idle',
+            '先歇一会儿',
+            isCoarsePointer() ? '点“继续看”，接着看下一笔！' : '按空格或“继续看”，接着看下一笔！'
+          );
           updatePlayButtonUI();
           return;
         }
@@ -969,26 +1321,41 @@
     }
   }
 
-  function startQuiz() {
+  function startQuiz(startStrokeIdx = 0) {
     if (!state.writer || !state.charData) return;
-    const total = state.charData.strokes.length;
+    const charData = state.charData;
+    const writer = state.writer;
+    const total = charData.strokes.length;
+    const clampedStart = Math.max(0, Math.min(total - 1, startStrokeIdx));
     const ch = state.nameChars[state.activeIndex];
-    const firstStrokeName = getStrokeName(ch, 0);
-    highlightStrokeStep(0);
+    const startStrokeName = getStrokeName(ch, clampedStart);
+    highlightStrokeStep(clampedStart);
     el.nextCharBtn.classList.add('hidden');
-    setBearMood('idle', `轮到你写「${ch}」啦`, `第 1 笔是「${firstStrokeName}」，沿着浅色字帖描一描！`);
+    setBearMood(
+      'idle',
+      `轮到你写「${ch}」啦`,
+      `第 ${clampedStart + 1} 笔是「${startStrokeName}」，沿着浅色字帖描一描！`
+    );
 
     if (state.showOutline) {
-      state.writer.showOutline();
+      writer.showOutline();
     } else {
-      state.writer.hideOutline();
+      writer.hideOutline();
     }
 
-    state.writer.quiz({
+    const initialLeniency = getStrokeLeniency(charData, ch, clampedStart);
+
+    const quizPromise = writer.quiz({
+      quizStartStrokeNum: clampedStart,
+      leniency: initialLeniency,
+      drawingWidth: getDrawingWidth(),
       onCorrectStroke: (strokeData) => {
         playCorrectSound();
         const nextIdx = strokeData.strokeNum + 1;
         if (nextIdx < total) {
+          if (writer._options) {
+            writer._options.leniency = getStrokeLeniency(charData, ch, nextIdx);
+          }
           const nextName = getStrokeName(ch, nextIdx);
           highlightStrokeStep(nextIdx);
           setBearMood('happy', '真棒！写对啦！', `下一笔是第 ${nextIdx + 1} 笔「${nextName}」`, 900);
@@ -999,13 +1366,21 @@
         playWrongSound();
         const idx = Math.max(0, state.currentStepIndex);
         const sName = getStrokeName(ch, idx);
-        setBearMood('encourage', '没关系，再来一次', `第 ${idx + 1} 笔是「${sName}」，看看红色闪光哦！`, 1200);
-        showToast('看看闪光提示再试一次', 'warn');
+        const isVert = VERTICAL_STROKE_NAMES.has(sName);
+        setBearMood(
+          'encourage',
+          '没关系，再来一次',
+          isVert
+            ? `第 ${idx + 1} 笔是「${sName}」，从上往下直直画哦！`
+            : `第 ${idx + 1} 笔是「${sName}」，看看红色闪光哦！`,
+          1200
+        );
+        showToast(isVert ? '从上往下慢慢画竖哦' : '看看闪光提示再试一次', 'warn');
       },
       onComplete: () => {
         playSuccessFanfare();
-        el.strokeProgressLabel.textContent = `写完啦！（共 ${total} 画）`;
         highlightStrokeStep(total - 1);
+        el.strokeProgressLabel.textContent = `写完啦！（共 ${total} 画）`;
         state.completed.add(state.activeIndex);
         renderNameTabs();
 
@@ -1015,7 +1390,8 @@
         if (state.completed.size >= state.nameChars.length) {
           launchConfetti();
           el.celebrateName.textContent = state.nameChars.join('');
-          setTimeout(() => {
+          clearTimeout(celebrateTimer);
+          celebrateTimer = setTimeout(() => {
             el.celebrateModal.classList.remove('hidden');
           }, 550);
         } else {
@@ -1025,6 +1401,18 @@
         }
       }
     });
+
+    if (quizPromise && typeof quizPromise.then === 'function') {
+      quizPromise
+        .then(() => {
+          if (state.writer === writer) {
+            attachLongVerticalQuizHook(writer, charData, ch);
+          }
+        })
+        .catch(() => {});
+    } else {
+      attachLongVerticalQuizHook(writer, charData, ch);
+    }
   }
 
   function findNextPendingChar() {
@@ -1311,9 +1699,15 @@
       if (!state.soundEnabled) stopCurrentAudio();
     });
 
-    el.closeShowcaseBtn.addEventListener('click', () => el.showcaseModal.classList.add('hidden'));
+    el.closeShowcaseBtn.addEventListener('click', () => {
+      el.showcaseModal.classList.add('hidden');
+      syncBoardSizeIfChanged();
+    });
     el.showcaseModal.addEventListener('click', (e) => {
-      if (e.target === el.showcaseModal) el.showcaseModal.classList.add('hidden');
+      if (e.target === el.showcaseModal) {
+        el.showcaseModal.classList.add('hidden');
+        syncBoardSizeIfChanged();
+      }
     });
     el.replayShowcaseBtn.addEventListener('click', playShowcaseSequence);
 
@@ -1329,11 +1723,48 @@
       el.celebrateModal.classList.add('hidden');
       openNamePicker();
     });
+
+    // 窗口旋转 / 尺寸自适应（仅当米字格宽度实际变化 >= 8px 且无弹窗打开时重绘，忽略手机软键盘高度变化）
+    let resizeTimer = null;
+    const scheduleBoardResizeCheck = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        updatePlayButtonUI();
+        syncBoardSizeIfChanged();
+      }, 180);
+    };
+
+    window.addEventListener('resize', scheduleBoardResizeCheck, { passive: true });
+    window.addEventListener('orientationchange', scheduleBoardResizeCheck, { passive: true });
+
+    if (window.matchMedia) {
+      const coarseMql = window.matchMedia('(pointer: coarse)');
+      if (typeof coarseMql.addEventListener === 'function') {
+        coarseMql.addEventListener('change', updatePlayButtonUI);
+      }
+    }
+  }
+
+  function syncBoardSizeIfChanged() {
+    if (anyModalOpen() || !state.writer || !state.charData) return;
+    const newWidth = getBoardSize();
+    if (!newWidth || Math.abs(newWidth - state.lastBoardWidth) < 8) return;
+
+    const isActiveQuiz =
+      state.mode === 'write' &&
+      state.writer._quiz &&
+      state.writer._quiz._isActive &&
+      state.currentStepIndex > 0;
+    loadActiveCharacter({
+      resumeStrokeIdx: isActiveQuiz ? state.currentStepIndex : 0
+    });
   }
 
   // 初始化
+  setupMobileAudioUnlock();
   loadSavedState();
   updateSpeedUI();
+  updatePlayButtonUI();
   renderSavedNames();
   renderPresetChips();
   renderNameTabs();

@@ -14,7 +14,8 @@ const files = [
   'app.js',
   'hanzi-writer.min.js',
   'stroke-data.js',
-  'favicon.svg'
+  'favicon.svg',
+  'manifest.webmanifest'
 ];
 
 for (const file of files) {
@@ -32,6 +33,10 @@ const headers = `/audio/*
 /stroke-data.js
   Cache-Control: public, max-age=86400
 
+/manifest.webmanifest
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: public, max-age=86400
+
 /index.html
   Cache-Control: public, max-age=0, must-revalidate
 `;
@@ -47,6 +52,7 @@ if (process.argv.includes('--serve')) {
     '.css': 'text/css; charset=utf-8',
     '.js': 'application/javascript; charset=utf-8',
     '.json': 'application/json; charset=utf-8',
+    '.webmanifest': 'application/manifest+json; charset=utf-8',
     '.svg': 'image/svg+xml',
     '.mp3': 'audio/mpeg'
   };
