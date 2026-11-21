@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# Environment & local overrides
+.env
+.env.*
+*.local
+
+# Local IDE & AI agent directories
+.serena/
+.claude/
+.orca/
+.paradev/
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Unrelated local userscripts
+qxc-batch-select.user.js

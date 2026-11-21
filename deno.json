@@ -1,0 +1,8 @@
+{
+  "deploy": {
+    "build": "node build.mjs",
+    "runtimeMode": "static",
+    "staticDir": "dist",
+    "singlePageApp": true
+  }
+}

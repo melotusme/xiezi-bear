@@ -1,0 +1,11 @@
+{
+  "name": "xiezi-bear",
+  "compatibility_date": "2026-11-19",
+  "build": {
+    "command": "node build.mjs"
+  },
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
