@@ -14,6 +14,8 @@ const files = [
   'app.js',
   'hanzi-writer.min.js',
   'stroke-data.js',
+  'stroke-loader.js',
+  'voice-engine.js',
   'favicon.svg',
   'manifest.webmanifest'
 ];
@@ -24,6 +26,19 @@ for (const file of files) {
 
 fs.cpSync(path.join(root, 'audio'), path.join(dist, 'audio'), { recursive: true });
 
+function countFilesRecursive(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      total += countFilesRecursive(full);
+    } else if (entry.isFile()) {
+      total += 1;
+    }
+  }
+  return total;
+}
+
 const headers = `/audio/*
   Cache-Control: public, max-age=31536000, immutable
 
@@ -31,6 +46,12 @@ const headers = `/audio/*
   Cache-Control: public, max-age=31536000, immutable
 
 /stroke-data.js
+  Cache-Control: public, max-age=86400
+
+/stroke-loader.js
+  Cache-Control: public, max-age=86400
+
+/voice-engine.js
   Cache-Control: public, max-age=86400
 
 /manifest.webmanifest
@@ -42,7 +63,7 @@ const headers = `/audio/*
 `;
 
 fs.writeFileSync(path.join(dist, '_headers'), headers, 'utf-8');
-console.log('Built dist/ successfully with', fs.readdirSync(path.join(dist, 'audio')).length, 'audio files.');
+console.log('Built dist/ successfully with', countFilesRecursive(path.join(dist, 'audio')), 'audio files.');
 
 if (process.argv.includes('--serve')) {
   const port = Number(process.env.PORT) || 3000;

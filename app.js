@@ -78,6 +78,8 @@
     openNamePickerBtn: document.getElementById('open-name-picker-btn'),
     speakNameBtn: document.getElementById('speak-name-btn'),
     animateAllBtn: document.getElementById('animate-all-btn'),
+    openVoicePickerBtn: document.getElementById('open-voice-picker-btn'),
+    currentVoiceBadge: document.getElementById('current-voice-badge'),
     soundToggle: document.getElementById('sound-toggle'),
     soundOnSvg: document.getElementById('sound-on-svg'),
     soundOffSvg: document.getElementById('sound-off-svg'),
@@ -129,6 +131,13 @@
     clearSlotsBtn: document.getElementById('clear-slots-btn'),
     presetChips: document.getElementById('preset-chips'),
 
+    voicePickerModal: document.getElementById('voice-picker-modal'),
+    closeVoicePickerBtn: document.getElementById('close-voice-picker-btn'),
+    voiceOptionsList: document.getElementById('voice-options-list'),
+    systemVoiceSection: document.getElementById('system-voice-section'),
+    systemVoiceSelect: document.getElementById('system-voice-select'),
+    systemVoiceEmpty: document.getElementById('system-voice-empty'),
+
     showcaseModal: document.getElementById('showcase-modal'),
     closeShowcaseBtn: document.getElementById('close-showcase-btn'),
     showcaseGrid: document.getElementById('showcase-grid'),
@@ -158,11 +167,14 @@
     }
   }
 
-  // Web Audio 轻音效（含移动端 Safari / 微信首次触摸静音解锁）
+  // Web Audio 轻音效（优先复用 VoiceEngine 共享 AudioContext 及移动端解锁）
   let audioCtx = null;
   let audioUnlockBound = false;
 
   function getAudioCtx() {
+    if (window.VoiceEngine && typeof window.VoiceEngine.getAudioCtx === 'function') {
+      return window.VoiceEngine.getAudioCtx();
+    }
     if (!audioCtx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (Ctx) {
@@ -180,6 +192,10 @@
   }
 
   function setupMobileAudioUnlock() {
+    if (window.VoiceEngine && typeof window.VoiceEngine.unlockAudio === 'function') {
+      window.VoiceEngine.unlockAudio();
+      return;
+    }
     if (audioUnlockBound || typeof document === 'undefined') return;
     audioUnlockBound = true;
 
@@ -254,10 +270,13 @@
     notes.forEach((n, i) => playTone(n, 0.2, 'triangle', 0.14, i * 0.09));
   }
 
-  // 自然人声语音播放（优先内置 XiaoxiaoNeural MP3）
+  // 多音色语音播放（优先委托给 window.VoiceEngine，支持 5 档音色与开源真人读音）
   let currentAudio = null;
 
   function stopCurrentAudio() {
+    if (window.VoiceEngine && typeof window.VoiceEngine.stop === 'function') {
+      window.VoiceEngine.stop();
+    }
     if (currentAudio) {
       try {
         currentAudio.pause();
@@ -342,22 +361,33 @@
     });
   }
 
+  function preloadVoiceChars(chars = state.nameChars) {
+    if (window.VoiceEngine && typeof window.VoiceEngine.preloadChars === 'function') {
+      window.VoiceEngine.preloadChars(chars);
+    }
+  }
+
   async function speakText(text) {
     if (!state.soundEnabled) {
       showToast('声音已关闭，点右上角打开哦');
       return;
     }
+    if (window.VoiceEngine && typeof window.VoiceEngine.speakText === 'function') {
+      const myToken = state.animToken;
+      await window.VoiceEngine.speakText(text, () => myToken !== state.animToken);
+      return;
+    }
     stopCurrentAudio();
     const chars = Array.from(text || '');
     if (chars.length === 1 && BUILTIN_AUDIO_CHARS.has(chars[0])) {
-      await playAudioClip(`audio/char_${chars[0]}.mp3`);
+      await playAudioClip(`audio/xiaoyi/char_${chars[0]}.mp3`);
       return;
     }
     if (chars.length > 1 && chars.every((c) => BUILTIN_AUDIO_CHARS.has(c))) {
       const myToken = state.animToken;
       for (const c of chars) {
         if (myToken !== state.animToken) return;
-        await playAudioClip(`audio/char_${c}.mp3`);
+        await playAudioClip(`audio/xiaoyi/char_${c}.mp3`);
       }
       return;
     }
@@ -368,9 +398,12 @@
     if (!state.soundEnabled || !strokeName) {
       return Promise.resolve();
     }
+    if (window.VoiceEngine && typeof window.VoiceEngine.speakStroke === 'function') {
+      return window.VoiceEngine.speakStroke(strokeName);
+    }
     stopCurrentAudio();
     if (BUILTIN_AUDIO_STROKES.has(strokeName)) {
-      return playAudioClip(`audio/stroke_${strokeName}.mp3`, 1800);
+      return playAudioClip(`audio/xiaoyi/stroke_${strokeName}.mp3`, 1800);
     }
     return speakWithBrowserTTS(strokeName, 1.0);
   }
@@ -777,8 +810,16 @@
     };
   }
 
-  // 笔画数据加载器
+  // 笔画数据加载器（优先走 4 级开源 StrokeLoader：内置 -> hanzi-writer-data -> animCJK -> BabelStone IDS）
   function charDataLoader(char, onComplete, onError) {
+    if (window.StrokeLoader && typeof window.StrokeLoader.loadCharData === 'function') {
+      window.StrokeLoader.loadCharData(char)
+        .then(onComplete)
+        .catch((err) => {
+          if (onError) onError(err);
+        });
+      return;
+    }
     if (window.BUILTIN_STROKE_DATA && window.BUILTIN_STROKE_DATA[char]) {
       onComplete(window.BUILTIN_STROKE_DATA[char]);
       return;
@@ -792,6 +833,40 @@
       .catch((err) => {
         if (onError) onError(err);
       });
+  }
+
+  function getDisplayPinyin(ch) {
+    if (CHAR_META[ch] && CHAR_META[ch].pinyin) {
+      return CHAR_META[ch].pinyin;
+    }
+    if (window.StrokeLoader && typeof window.StrokeLoader.getCharPinyin === 'function') {
+      return window.StrokeLoader.getCharPinyin(ch, '汉字') || '汉字';
+    }
+    return '汉字';
+  }
+
+  function refreshDisplayedPinyin() {
+    renderNameTabs();
+    const ch = state.nameChars[state.activeIndex];
+    if (ch && el.currentPinyin) {
+      el.currentPinyin.textContent = getDisplayPinyin(ch);
+    }
+  }
+
+  function initPinyinEngine() {
+    if (!window.StrokeLoader) return;
+    if (typeof window.StrokeLoader.preloadPinyinPro === 'function') {
+      window.StrokeLoader.preloadPinyinPro();
+    }
+    if (typeof window.StrokeLoader.ensurePinyinReady === 'function') {
+      window.StrokeLoader.ensurePinyinReady()
+        .then((ready) => {
+          if (!ready) return;
+          refreshDisplayedPinyin();
+          preloadVoiceChars(state.nameChars);
+        })
+        .catch(() => {});
+    }
   }
 
   function writerCharDataLoader(char, onComplete, onError) {
@@ -850,9 +925,193 @@
   function anyModalOpen() {
     return (
       !el.namePickerModal.classList.contains('hidden') ||
+      (el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) ||
       !el.showcaseModal.classList.contains('hidden') ||
       !el.celebrateModal.classList.contains('hidden')
     );
+  }
+
+  // 音色切换弹窗（换声音）
+  let voicePreviewSeq = 0;
+
+  function updateVoiceButtonUI() {
+    if (!window.VoiceEngine || typeof window.VoiceEngine.getCurrentProfile !== 'function') return;
+    const profile = window.VoiceEngine.getCurrentProfile();
+    if (el.currentVoiceBadge) {
+      el.currentVoiceBadge.textContent = profile.shortName || profile.name;
+    }
+    if (el.openVoicePickerBtn) {
+      el.openVoicePickerBtn.title = `切换朗读音色（当前：${profile.name}）`;
+    }
+  }
+
+  function clearPreviewingButtons() {
+    if (!el.voiceOptionsList) return;
+    el.voiceOptionsList.querySelectorAll('.voice-preview-btn.is-previewing').forEach((btn) => {
+      btn.classList.remove('is-previewing');
+    });
+  }
+
+  async function auditionVoice(voiceId, triggerBtn = null) {
+    if (!state.soundEnabled) {
+      showToast('声音已关闭，点右上角打开哦');
+      return;
+    }
+    if (!window.VoiceEngine || typeof window.VoiceEngine.previewVoice !== 'function') return;
+    voicePreviewSeq += 1;
+    const mySeq = voicePreviewSeq;
+    clearPreviewingButtons();
+    if (triggerBtn) triggerBtn.classList.add('is-previewing');
+    const sampleChar = state.nameChars[state.activeIndex] || '王';
+    try {
+      await window.VoiceEngine.previewVoice(voiceId, sampleChar);
+    } finally {
+      if (mySeq === voicePreviewSeq && triggerBtn) {
+        triggerBtn.classList.remove('is-previewing');
+      }
+    }
+  }
+
+  function renderSystemVoices() {
+    if (!el.systemVoiceSection || !el.systemVoiceSelect || !window.VoiceEngine) return;
+    const isSystem = window.VoiceEngine.getVoiceId() === 'system';
+    el.systemVoiceSection.classList.toggle('hidden', !isSystem);
+    if (!isSystem) return;
+
+    const voices = typeof window.VoiceEngine.getSystemVoices === 'function'
+      ? window.VoiceEngine.getSystemVoices()
+      : [];
+    const currentURI = typeof window.VoiceEngine.getSystemVoiceURI === 'function'
+      ? window.VoiceEngine.getSystemVoiceURI()
+      : '';
+
+    el.systemVoiceSelect.innerHTML = '';
+    const autoOpt = document.createElement('option');
+    autoOpt.value = '';
+    autoOpt.textContent = '自动选择最佳中文语音';
+    el.systemVoiceSelect.appendChild(autoOpt);
+
+    voices.forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v.voiceURI;
+      opt.textContent = v.lang ? `${v.name} (${v.lang})` : v.name;
+      el.systemVoiceSelect.appendChild(opt);
+    });
+
+    el.systemVoiceSelect.value = voices.some((v) => v.voiceURI === currentURI) ? currentURI : '';
+    if (el.systemVoiceEmpty) {
+      el.systemVoiceEmpty.classList.toggle('hidden', voices.length > 0);
+    }
+  }
+
+  function renderVoiceOptions() {
+    if (!el.voiceOptionsList || !window.VoiceEngine || typeof window.VoiceEngine.getProfiles !== 'function') return;
+    const profiles = window.VoiceEngine.getProfiles();
+    const activeId = window.VoiceEngine.getVoiceId();
+    el.voiceOptionsList.innerHTML = '';
+
+    profiles.forEach((profile) => {
+      const isActive = profile.id === activeId;
+      const card = document.createElement('div');
+      card.className = `voice-card${isActive ? ' active' : ''}`;
+      card.setAttribute('role', 'radio');
+      card.setAttribute('aria-checked', String(isActive));
+      card.tabIndex = 0;
+
+      const iconWrap = document.createElement('div');
+      iconWrap.className = 'voice-card-icon';
+      iconWrap.setAttribute('aria-hidden', 'true');
+      iconWrap.textContent = profile.icon || '🎙️';
+
+      const body = document.createElement('div');
+      body.className = 'voice-card-body';
+
+      const titleRow = document.createElement('div');
+      titleRow.className = 'voice-card-title-row';
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'voice-card-name';
+      nameEl.textContent = profile.name;
+
+      const tagEl = document.createElement('span');
+      tagEl.className = `voice-tag voice-tag-${profile.id}`;
+      tagEl.textContent = profile.tag;
+
+      titleRow.appendChild(nameEl);
+      titleRow.appendChild(tagEl);
+
+      const descEl = document.createElement('p');
+      descEl.className = 'voice-card-desc';
+      descEl.textContent = profile.desc;
+
+      body.appendChild(titleRow);
+      body.appendChild(descEl);
+
+      const actions = document.createElement('div');
+      actions.className = 'voice-card-actions';
+
+      const checkEl = document.createElement('span');
+      checkEl.className = 'voice-check';
+      checkEl.setAttribute('aria-hidden', 'true');
+      checkEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+      const previewBtn = document.createElement('button');
+      previewBtn.type = 'button';
+      previewBtn.className = 'voice-preview-btn';
+      previewBtn.setAttribute('aria-label', `试听${profile.name}`);
+      previewBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg><span>试听</span>`;
+      previewBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        previewBtn.blur();
+        auditionVoice(profile.id, previewBtn);
+      });
+
+      actions.appendChild(checkEl);
+      actions.appendChild(previewBtn);
+
+      const selectVoice = () => {
+        window.VoiceEngine.setVoiceId(profile.id);
+        updateVoiceButtonUI();
+        preloadVoiceChars(state.nameChars);
+        renderVoiceOptions();
+        renderSystemVoices();
+        if (state.soundEnabled) {
+          auditionVoice(profile.id);
+        } else {
+          showToast(`已切换到「${profile.name}」`);
+        }
+      };
+
+      card.addEventListener('click', selectVoice);
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          selectVoice();
+        }
+      });
+
+      card.appendChild(iconWrap);
+      card.appendChild(body);
+      card.appendChild(actions);
+      el.voiceOptionsList.appendChild(card);
+    });
+  }
+
+  function openVoicePicker() {
+    if (!el.voicePickerModal) return;
+    cancelSpeechAndAnim();
+    renderVoiceOptions();
+    renderSystemVoices();
+    el.voicePickerModal.classList.remove('hidden');
+  }
+
+  function closeVoicePicker() {
+    if (!el.voicePickerModal || el.voicePickerModal.classList.contains('hidden')) return;
+    voicePreviewSeq += 1;
+    clearPreviewingButtons();
+    stopCurrentAudio();
+    el.voicePickerModal.classList.add('hidden');
+    syncBoardSizeIfChanged();
   }
 
   function openNamePicker() {
@@ -998,6 +1257,14 @@
     renderSavedNames();
     renderPresetChips();
     renderNameTabs();
+    preloadVoiceChars(chars);
+    if (window.StrokeLoader && typeof window.StrokeLoader.ensurePinyinReady === 'function') {
+      window.StrokeLoader.ensurePinyinReady()
+        .then((ready) => {
+          if (ready) refreshDisplayedPinyin();
+        })
+        .catch(() => {});
+    }
     loadActiveCharacter();
   }
 
@@ -1007,7 +1274,7 @@
     el.charTabs.innerHTML = '';
 
     state.nameChars.forEach((ch, idx) => {
-      const meta = CHAR_META[ch] || { pinyin: '汉字', tip: '一笔一画慢慢写' };
+      const pinyin = getDisplayPinyin(ch);
       const isActive = idx === state.activeIndex;
       const isDone = state.completed.has(idx);
 
@@ -1020,7 +1287,7 @@
         <span class="char-tab-glyph">${ch}</span>
         <span class="char-tab-info">
           <span class="char-tab-order">第 ${idx + 1} 个字</span>
-          <span class="char-tab-pinyin">${meta.pinyin}</span>
+          <span class="char-tab-pinyin">${pinyin}</span>
         </span>
         <span class="char-tab-star">${isDone ? STAR_FILLED_SVG : STAR_EMPTY_SVG}</span>
       `;
@@ -1127,10 +1394,10 @@
     state.loadToken += 1;
     const myToken = state.loadToken;
     const ch = state.nameChars[state.activeIndex];
-    const meta = CHAR_META[ch] || { pinyin: '汉字', tip: '跟着红线一笔一画慢慢写' };
+    const meta = CHAR_META[ch] || { tip: '跟着红线一笔一画慢慢写' };
 
     el.currentCharBadge.textContent = ch;
-    el.currentPinyin.textContent = meta.pinyin;
+    el.currentPinyin.textContent = getDisplayPinyin(ch);
     el.currentTip.textContent = meta.tip;
     el.nextCharBtn.classList.add('hidden');
     el.strokeProgressLabel.textContent = '准备中...';
@@ -1540,6 +1807,42 @@
       if (e.target === el.namePickerModal) closeNamePicker();
     });
 
+    if (el.openVoicePickerBtn) {
+      el.openVoicePickerBtn.addEventListener('click', () => {
+        el.openVoicePickerBtn.blur();
+        openVoicePicker();
+      });
+    }
+    if (el.closeVoicePickerBtn) {
+      el.closeVoicePickerBtn.addEventListener('click', closeVoicePicker);
+    }
+    if (el.voicePickerModal) {
+      el.voicePickerModal.addEventListener('click', (e) => {
+        if (e.target === el.voicePickerModal) closeVoicePicker();
+      });
+    }
+    if (el.systemVoiceSelect) {
+      el.systemVoiceSelect.addEventListener('change', (e) => {
+        if (!window.VoiceEngine || typeof window.VoiceEngine.setSystemVoiceURI !== 'function') return;
+        window.VoiceEngine.setSystemVoiceURI(e.target.value);
+        if (state.soundEnabled) {
+          auditionVoice('system');
+        }
+      });
+    }
+    if ('speechSynthesis' in window) {
+      const handleVoicesChanged = () => {
+        if (el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) {
+          renderSystemVoices();
+        }
+      };
+      if (typeof window.speechSynthesis.addEventListener === 'function') {
+        window.speechSynthesis.addEventListener('voiceschanged', handleVoicesChanged);
+      } else {
+        window.speechSynthesis.onvoiceschanged = handleVoicesChanged;
+      }
+    }
+
     el.applyNameBtn.addEventListener('click', () => {
       state.chipBufferMode = false;
       const chars = extractHanzi(el.nameInput.value);
@@ -1615,6 +1918,7 @@
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeNamePicker();
+        closeVoicePicker();
         el.showcaseModal.classList.add('hidden');
         el.celebrateModal.classList.add('hidden');
         return;
@@ -1763,6 +2067,9 @@
   // 初始化
   setupMobileAudioUnlock();
   loadSavedState();
+  initPinyinEngine();
+  updateVoiceButtonUI();
+  preloadVoiceChars(state.nameChars);
   updateSpeedUI();
   updatePlayButtonUI();
   renderSavedNames();

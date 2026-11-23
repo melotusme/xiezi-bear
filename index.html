@@ -104,6 +104,16 @@
           <span>连看3字</span>
         </button>
 
+        <button id="open-voice-picker-btn" class="toy-btn btn-lilac" type="button" title="切换朗读音色（换声音）" aria-label="换声音">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+          <span>换声音</span>
+          <span id="current-voice-badge" class="voice-btn-badge">开源真人</span>
+        </button>
+
         <button id="sound-toggle" class="toy-btn btn-cream icon-only-sm" type="button" title="开启或关闭声音" aria-label="声音开关">
           <svg id="sound-on-svg" class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
@@ -380,6 +390,34 @@
     </div>
   </div>
 
+  <!-- 音色切换弹窗（换声音） -->
+  <div id="voice-picker-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="voice-picker-title">
+    <div class="modal-sheet voice-picker-sheet">
+      <div class="modal-head">
+        <h2 id="voice-picker-title">挑选小熊的读音</h2>
+        <button id="close-voice-picker-btn" class="modal-close-btn" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <p class="voice-modal-hint">点一下音色卡片马上切换，点右侧“试听”可以先听听效果！</p>
+
+      <div id="voice-options-list" class="voice-options-list" role="radiogroup" aria-label="朗读音色选项">
+        <!-- 由 JS 根据 VoiceEngine.getProfiles() 渲染 -->
+      </div>
+
+      <div id="system-voice-section" class="system-voice-section hidden">
+        <label class="picker-section-title" for="system-voice-select">选择本机中文语音</label>
+        <select id="system-voice-select" class="system-voice-select"></select>
+        <p id="system-voice-empty" class="system-voice-empty hidden">当前浏览器未提供可选的中文语音列表，将自动使用系统默认中文读音。</p>
+      </div>
+
+      <p class="voice-credit">真人普通话声库来自开源 Shtooka / audio-cmn (CC-BY-SA) 与 mp3-chinese-pinyin-sound；笔顺数据来自 Hanzi Writer / animCJK / BabelStone IDS；拼音由 pinyin-pro 提供。</p>
+    </div>
+  </div>
+
   <!-- 连续演示3个字弹窗 -->
   <div id="showcase-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="showcase-title">
     <div class="modal-sheet showcase-sheet">
@@ -425,6 +463,8 @@
 
   <script src="hanzi-writer.min.js"></script>
   <script src="stroke-data.js"></script>
+  <script src="stroke-loader.js"></script>
+  <script src="voice-engine.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

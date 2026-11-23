@@ -88,15 +88,19 @@ button {
 
 button,
 input,
+select,
 [role="button"],
-[role="tab"] {
+[role="tab"],
+[role="radio"] {
   touch-action: manipulation;
 }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 [role="button"]:focus-visible,
-[role="tab"]:focus-visible {
+[role="tab"]:focus-visible,
+[role="radio"]:focus-visible {
   outline: 3px solid var(--sky);
   outline-offset: 3px;
 }
@@ -316,6 +320,26 @@ input:focus-visible,
   color: var(--ink);
   border: 2px solid var(--border-warm);
   border-bottom: 4px solid var(--cream-lip);
+}
+
+.btn-lilac {
+  background: #f1e9ff;
+  color: #4b3578;
+  border: 2px solid #dbc9ff;
+  border-bottom: 4px solid #bfa2f2;
+}
+
+.voice-btn-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1.5px solid #d5c1fa;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: #5b3e96;
+  line-height: 1.2;
 }
 
 /* 3个名字大字选择条 */
@@ -1118,6 +1142,247 @@ input:focus-visible,
   color: #167959;
 }
 
+/* 音色切换弹窗（换声音） */
+.voice-picker-sheet {
+  max-width: 540px;
+}
+
+.voice-modal-hint {
+  margin: -4px 0 14px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.voice-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.voice-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 20px;
+  border: 2.5px solid #f0dfc7;
+  border-bottom-width: 5px;
+  background: #ffffff;
+  cursor: pointer;
+  min-height: 66px;
+  transition: transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.voice-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--sky);
+  background: #f9fdff;
+}
+
+.voice-card.active {
+  border-color: var(--coral);
+  background: #fff5f5;
+  box-shadow: 0 8px 20px rgba(255, 116, 119, 0.16);
+}
+
+.voice-card-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: #fff6e5;
+  border: 2px solid #f5dfb8;
+  display: grid;
+  place-items: center;
+  font-size: 1.35rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.voice-card.active .voice-card-icon {
+  background: #ffe9e9;
+  border-color: #ffc2c4;
+}
+
+.voice-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-card-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-card-name {
+  font-size: 1rem;
+  font-weight: 900;
+  color: var(--ink);
+}
+
+.voice-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1.35;
+  background: #eef8ff;
+  color: #236ca6;
+  border: 1.5px solid #cbe4f8;
+}
+
+.voice-tag-human {
+  background: #fff0e5;
+  color: #c85a17;
+  border-color: #ffd0b0;
+}
+
+.voice-tag-yunxia {
+  background: #fff7d6;
+  color: #9e6200;
+  border-color: #ffe08a;
+}
+
+.voice-tag-xiaoyi {
+  background: #fff0f4;
+  color: #c23b68;
+  border-color: #ffc8d9;
+}
+
+.voice-tag-yunxi {
+  background: #eaf8ff;
+  color: #1f6fa8;
+  border-color: #bfe4fc;
+}
+
+.voice-tag-system {
+  background: #f3f0eb;
+  color: #6b5748;
+  border-color: #dfd3c3;
+}
+
+.voice-card-desc {
+  margin: 3px 0 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+
+.voice-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.voice-check {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #e5d2ba;
+  background: #fffdf9;
+  color: transparent;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.voice-check svg {
+  width: 14px;
+  height: 14px;
+}
+
+.voice-card.active .voice-check {
+  border-color: var(--coral);
+  background: var(--coral);
+  color: #ffffff;
+}
+
+.voice-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 2px solid #cde7fa;
+  border-bottom-width: 3px;
+  background: #eef8ff;
+  color: #236ca6;
+  font-size: 0.84rem;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+}
+
+.voice-preview-btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.voice-preview-btn:hover {
+  transform: translateY(-1px);
+  background: #dff2ff;
+  border-color: var(--sky);
+}
+
+.voice-preview-btn:active {
+  transform: translateY(1px);
+}
+
+.voice-preview-btn.is-previewing {
+  background: var(--sky);
+  border-color: var(--sky-lip);
+  color: #ffffff;
+}
+
+.system-voice-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 2px dashed #f3e4cf;
+}
+
+.system-voice-select {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  border: 2.5px solid #ead4b8;
+  background: #ffffff;
+  font-family: inherit;
+  font-size: 0.94rem;
+  font-weight: 800;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.system-voice-empty {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.voice-credit {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 2px dashed #f3e4cf;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  opacity: 0.88;
+  line-height: 1.5;
+}
+
 /* 演示 & 庆祝弹窗 */
 .showcase-sheet,
 .celebrate-sheet {
@@ -1205,8 +1470,14 @@ input:focus-visible,
 @media (pointer: coarse) {
   .toy-btn,
   .mode-tab,
-  .saved-name-pill {
+  .saved-name-pill,
+  .voice-preview-btn,
+  .system-voice-select {
     min-height: 44px;
+  }
+
+  .voice-card {
+    min-height: 68px;
   }
 
   .circle-speaker-btn,
@@ -1252,6 +1523,42 @@ input:focus-visible,
 
   .top-bar {
     gap: 10px;
+  }
+
+  .top-actions {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .top-actions .toy-btn {
+    padding: 8px 11px;
+    font-size: 0.84rem;
+  }
+
+  .voice-btn-badge {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+  }
+
+  .voice-card {
+    padding: 10px 11px;
+    gap: 10px;
+  }
+
+  .voice-card-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 1.15rem;
+  }
+
+  .voice-card-desc {
+    font-size: 0.76rem;
+  }
+
+  .voice-preview-btn {
+    min-height: 44px;
+    padding: 6px 10px;
+    font-size: 0.82rem;
   }
 
   .brand-badge {

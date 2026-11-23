@@ -53,13 +53,16 @@
   - **加大米字格与防误触**：手机端大尺寸米字格书写区，锁定页面下拉刷新与橡皮筋回弹（`overscroll-behavior` / `touch-action`），向下运笔更顺畅；全站按钮支持大热区零延迟点按与刘海/底部安全区适配。
   - **儿童友好的长竖笔画宽容度**：针对小朋友手指在手机屏幕上书写较长竖画（如竖、竖钩、竖提）容易微偏或收笔略短的特点，专项放宽长竖笔判定容差，同时依然准确拦截错笔与倒笔。
   - **PWA 全屏主屏幕应用**：支持 iOS Safari / Android Chrome「添加到主屏幕（Add to Home Screen）」，以独立全屏写字本模式启动，无浏览器地址栏干扰。
-- ✍️ **两种练字模式自由切换**：
+- ✍️ **两种练字模式自由切换 + 4 级生僻字笔顺与完整拼音**：
   - **跟着看**：支持慢速逐笔报笔画名称、快速连看、上一笔/下一笔单步跳转、空格键随时“写完本笔停”以及“连看 3 字”笔顺秀。
   - **自己写**：米字格描红引导（可开关描红轮廓）、写错自动闪红提示、“帮帮我”高亮当前笔画，写完集齐星星触发奖杯礼花庆祝。
-- 🔊 **自然语音报笔画 + 任意汉字兜底**：
-  - 内置 **27 种汉字基础与复合笔画**（横、竖、撇、捺、点、提、横折钩、竖弯钩、卧钩等）及常用示例字的高清离线 MP3 语音；
-  - 输入**任意其他汉字**时，自动通过 `hanzi-writer-data` 加载笔顺路径、几何识别每一笔的笔画名称，并无缝回退至浏览器原生中文语音合成（Web Speech API）。
-- 🧩 **隐私安全的自定义名字管理**：支持直接输入任意小朋友名字或通过常用字积木拼字，所有保存的名字仅存储在当前设备本地浏览器 `localStorage` 中，零个人数据传输。
+  - **4 级开源笔顺加载引擎（`stroke-loader.js`）**：按 **内置示例库 → `hanzi-writer-data` → `hanzi-writer-data-acjk` / `animCJK` 简体笔顺 → `BabelStone IDS` 部件递归拼合** 顺序解析，生僻字、起名常用字（如 `淏`、`玥`、`汐`、`芃`、`琂` 等）均可流畅展示规范笔顺与描红测验，并带内存与 `sessionStorage` 缓存。
+  - **完整实时拼音**：按需加载开源 `pinyin-pro` 引擎，自动为任意汉字显示准确声调拼音并识别常见复姓/多音姓氏读音。
+- 🔊 **5 档音色随心切换（`换声音` + 独立`试听`）**：
+  - **开源真人**（默认）：基于开源 Shtooka / `hugolpz/audio-cmn`（CC BY-SA）录音室真人普通话音节库，辅以 `davinfifield/mp3-chinese-pinyin-sound`（Unlicense）兜底；通过 Web Audio 实时静音裁剪与无缝拼接，实现 **2 万+汉字与全部 27 种笔画** 的自然真人朗读。
+  - **小熊童声 / 温柔姐姐 / 阳光哥哥**：3 套经静音裁剪、无标签头精简的本地离线 MP3 语音包（`audio/yunxia/`、`audio/xiaoyi/`、`audio/yunxi/`，共 123 条音频），覆盖全部 27 种笔画名称与 14 个示例字；遇到任意自定义生僻字时自动衔接开源真人发音，告别生硬机读。
+  - **系统语音**：直接调用本机浏览器 Web Speech API，完全离线可用，并支持在弹窗内自选设备已安装的中文语音。
+- 🧩 **隐私安全的自定义名字管理**：支持直接输入任意小朋友名字或通过常用字积木拼字，所有保存的名字与音色偏好仅存储在当前设备本地浏览器 `localStorage` 中，零个人数据传输。
 
 ---
 
@@ -88,12 +91,14 @@ npm run deploy   # 部署至 Cloudflare Workers
 
 ```text
 .
-├── index.html          # 应用主页面与 SVG 绘本插画结构
-├── styles.css          # 响应式绘本风格样式与小熊动画
-├── app.js              # 笔顺播放、描红测验、几何笔画识别与语音控制逻辑
+├── index.html          # 应用主页面、SVG 绘本插画与音色切换弹窗结构
+├── styles.css          # 响应式绘本风格样式、音色卡片与小熊动画
+├── app.js              # 笔顺播放、描红测验、几何笔画识别与交互控制逻辑
+├── stroke-loader.js    # 4 级开源笔顺加载器（hanzi-writer-data / animCJK / BabelStone IDS）与 pinyin-pro 封装
+├── voice-engine.js     # 5 音色语音引擎（Shtooka 开源真人 Web Audio 无缝拼接 + 3 套本地语音包 + 系统语音）
 ├── hanzi-writer.min.js # Hanzi Writer v3.5.0 汉字笔顺渲染引擎
 ├── stroke-data.js      # 内置示例汉字离线笔顺数据（其余汉字自动按需加载）
-├── audio/                 # 27 种笔画名称与内置示例字离线语音 MP3
+├── audio/              # 3 套本地离线语音包（yunxia / xiaoyi / yunxi，各 41 条共 123 个精简 MP3）
 ├── favicon.svg            # 小熊图标（网页与主屏幕图标）
 ├── manifest.webmanifest   # PWA Web App Manifest（主屏幕全屏模式配置）
 ├── build.mjs              # 零依赖静态打包脚本（含 --serve 本地预览服务与 _headers 生成）
@@ -110,6 +115,13 @@ npm run deploy   # 部署至 Cloudflare Workers
 
 ---
 
-## 📄 开源协议
+## 📄 开源协议与数据致谢
 
-本项目基于 [MIT License](./LICENSE) 开源。汉字笔顺渲染基于开源库 [Hanzi Writer](https://github.com/chanind/hanzi-writer)（MIT License）。
+本项目源码基于 [MIT License](./LICENSE) 开源。运行过程中使用的开源库、笔顺数据与真人普通话语音资源均遵循各自开源许可协议：
+
+- **笔顺渲染引擎**：[Hanzi Writer](https://github.com/chanind/hanzi-writer)（MIT License）
+- **基础笔顺数据**：[hanzi-writer-data](https://github.com/chanind/hanzi-writer-data) / Make Me a Hanzi（Arphic Public License / LGPLv3）
+- **扩展生僻字笔顺**：[animCJK](https://github.com/parsimonhi/animCJK) & [hanzi-writer-data-acjk](https://www.npmjs.com/package/hanzi-writer-data-acjk)（Arphic Public License / LGPLv3）
+- **生僻字部件拆解兜底**：[BabelStone IDS](https://www.babelstone.co.uk/CJK/IDS.TXT)（Public Domain，公有领域）
+- **汉字拼音与姓氏多音字**：[pinyin-pro](https://github.com/zh-lx/pinyin-pro)（MIT License）
+- **开源真人普通话语音**：[Shtooka / hugolpz/audio-cmn](https://github.com/hugolpz/audio-cmn)（CC BY-SA，署名-相同方式共享）与 [davinfifield/mp3-chinese-pinyin-sound](https://github.com/davinfifield/mp3-chinese-pinyin-sound)（Unlicense，公有领域）
