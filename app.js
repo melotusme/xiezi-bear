@@ -279,6 +279,14 @@
     }
   }
 
+  function preloadVoiceStrokes(ch, charData = state.charData) {
+    if (!ch || !charData || !Array.isArray(charData.strokes)) return;
+    if (window.VoiceEngine && typeof window.VoiceEngine.preloadStrokes === 'function') {
+      const names = charData.strokes.map((_, idx) => getStrokeName(ch, idx));
+      window.VoiceEngine.preloadStrokes(names);
+    }
+  }
+
   async function speakText(text) {
     if (!state.soundEnabled) {
       showToast('声音已关闭，点右上角打开哦');
@@ -1068,6 +1076,7 @@
         window.VoiceEngine.setVoiceId(profile.id);
         updateVoiceButtonUI();
         preloadVoiceChars(state.nameChars);
+        preloadVoiceStrokes(state.nameChars[state.activeIndex], state.charData);
         renderVoiceOptions();
         renderSystemVoices();
         if (state.soundEnabled) {
@@ -1502,6 +1511,7 @@
       state.charData = charData;
       state.preparedCharData = preparedData;
       state.strokeVertInfos = buildStrokeVertInfos(charData, ch);
+      preloadVoiceStrokes(ch, charData);
       renderStrokeSteps(charData);
 
       el.hanziTarget.innerHTML = '';
@@ -1602,7 +1612,7 @@
       state.writer.showOutline();
     }
 
-    const pauseGapMs = state.isSlow ? 140 : 120;
+    const pauseGapMs = state.isSlow ? 400 : 180;
 
     for (let i = startIndex; i < total; i += 1) {
       if (myAnimToken !== state.animToken) return;

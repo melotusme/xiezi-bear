@@ -491,6 +491,83 @@ test('voice-engine: 404 on audio-cmn skips remaining mirrors and tries davinfifi
   assert.equal(davinCalls.length, 1);
 });
 
+test('voice-engine: default voice is xiaoxiao and migrates legacy human default once', () => {
+  // 1. Fresh user defaults to xiaoxiao
+  const ctxFresh = createBrowserSandbox();
+  loadScriptInto(ctxFresh, 'voice-engine.js');
+  assert.equal(ctxFresh.VoiceEngine.getVoiceId(), 'xiaoxiao');
+  assert.equal(ctxFresh.VoiceEngine.getProfiles()[0].id, 'xiaoxiao');
+
+  // 2. Existing user stuck on legacy default 'human' is migrated once to 'xiaoxiao'
+  const legacyStorage = createMemoryStorage();
+  legacyStorage.setItem('hanzi_name_voice_v1', 'human');
+  const ctxLegacy = createBrowserSandbox({ localStorage: legacyStorage });
+  loadScriptInto(ctxLegacy, 'voice-engine.js');
+  assert.equal(ctxLegacy.VoiceEngine.getVoiceId(), 'xiaoxiao');
+  assert.equal(legacyStorage.getItem('hanzi_name_voice_v1'), 'xiaoxiao');
+  assert.equal(legacyStorage.getItem('hanzi_name_voice_migrated_v2'), '1');
+
+  // 3. Explicit user choice (including 'human' after migration or 'yunxia') is preserved
+  ctxLegacy.VoiceEngine.setVoiceId('human');
+  const ctxExplicitHuman = createBrowserSandbox({ localStorage: legacyStorage });
+  loadScriptInto(ctxExplicitHuman, 'voice-engine.js');
+  assert.equal(ctxExplicitHuman.VoiceEngine.getVoiceId(), 'human');
+
+  const yunxiaStorage = createMemoryStorage();
+  yunxiaStorage.setItem('hanzi_name_voice_v1', 'yunxia');
+  const ctxYunxia = createBrowserSandbox({ localStorage: yunxiaStorage });
+  loadScriptInto(ctxYunxia, 'voice-engine.js');
+  assert.equal(ctxYunxia.VoiceEngine.getVoiceId(), 'yunxia');
+});
+
+test('voice-engine: loadLocalAudioBuffer trims silence and preloadChars/preloadStrokes warm local pack', async () => {
+  const requested = [];
+  const fakeAudioCtx = createFakeAudioContext('running');
+  // Decode a buffer with leading/trailing silence around active speech
+  fakeAudioCtx.decodeAudioData = (_arr, resolve) => {
+    const sr = 24000;
+    const len = sr; // 1.0s
+    const buf = fakeAudioCtx.createBuffer(1, len, sr);
+    const data = buf.getChannelData(0);
+    // Active region from 0.25s to 0.55s
+    for (let i = Math.round(sr * 0.25); i < Math.round(sr * 0.55); i += 1) {
+      data[i] = 0.4;
+    }
+    if (resolve) resolve(buf);
+    return Promise.resolve(buf);
+  };
+
+  const ctx = createBrowserSandbox({
+    AudioContext: function () {
+      return fakeAudioCtx;
+    },
+    fetch: async (url) => {
+      requested.push(url);
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => new ArrayBuffer(512)
+      };
+    }
+  });
+  loadScriptInto(ctx, 'voice-engine.js');
+
+  const entry = await ctx.VoiceEngine._internals.loadLocalAudioBuffer('audio/xiaoxiao/stroke_%E6%A8%AA.mp3');
+  assert.ok(entry && entry.buffer);
+  assert.ok(entry.buffer.length < 24000, 'leading/trailing silence should be trimmed from local audio');
+
+  requested.length = 0;
+  ctx.VoiceEngine.preloadChars(['王', '小']);
+  ctx.VoiceEngine.preloadStrokes(['横', '竖', '横']);
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.ok(requested.some((u) => u === `audio/xiaoxiao/char_${encodeURIComponent('王')}.mp3`));
+  assert.ok(requested.some((u) => u === `audio/xiaoxiao/char_${encodeURIComponent('小')}.mp3`));
+  assert.ok(requested.some((u) => u === `audio/xiaoxiao/stroke_${encodeURIComponent('竖')}.mp3`));
+  // '横' was already cached above, so preloadStrokes should reuse cache without refetching it
+  assert.equal(requested.filter((u) => u.includes(`stroke_${encodeURIComponent('横')}`)).length, 0);
+});
+
 test('build.mjs: injects content hashes in dist/index.html and writes complete _headers', () => {
   execFileSync(process.execPath, [path.join(ROOT, 'build.mjs')], { cwd: ROOT });
 

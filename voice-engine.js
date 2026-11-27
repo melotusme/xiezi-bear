@@ -2,7 +2,9 @@
   'use strict';
 
   const STORAGE_KEY_VOICE = 'hanzi_name_voice_v1';
+  const STORAGE_KEY_VOICE_MIGRATED = 'hanzi_name_voice_migrated_v2';
   const STORAGE_KEY_SYS_VOICE = 'hanzi_name_sys_voice_v1';
+  const DEFAULT_VOICE_ID = 'xiaoxiao';
 
   const BUILTIN_AUDIO_CHARS = new Set([
     '王', '李', '张', '林',
@@ -43,12 +45,12 @@
 
   const VOICE_PROFILES = [
     {
-      id: 'human',
-      name: '开源真人',
-      shortName: '开源真人',
-      icon: '🎙️',
-      tag: '开源录音',
-      desc: 'Shtooka 录音室真人普通话（CC-BY-SA），覆盖 2 万+汉字与全部笔画'
+      id: 'xiaoxiao',
+      name: '晓晓老师',
+      shortName: '晓晓老师',
+      icon: '👩‍🏫',
+      tag: '温柔自然',
+      desc: '自然亲切的老师范儿慢读笔顺，咬字清晰不机械，生僻字自动衔接开源真人'
     },
     {
       id: 'yunxia',
@@ -75,6 +77,14 @@
       desc: '清朗自然男声伴读，生僻字自动衔接开源真人发音'
     },
     {
+      id: 'human',
+      name: '开源真人',
+      shortName: '开源真人',
+      icon: '🎙️',
+      tag: '开源录音',
+      desc: 'Shtooka 录音室真人普通话（CC-BY-SA），覆盖 2 万+汉字与全部笔画'
+    },
+    {
       id: 'system',
       name: '系统语音',
       shortName: '系统语音',
@@ -84,7 +94,7 @@
     }
   ];
 
-  const LOCAL_PACK_IDS = new Set(['yunxia', 'xiaoyi', 'yunxi']);
+  const LOCAL_PACK_IDS = new Set(['xiaoxiao', 'yunxia', 'xiaoyi', 'yunxi']);
   const PROFILE_MAP = new Map(VOICE_PROFILES.map((p) => [p.id, p]));
 
   const CDN_FETCH_TIMEOUT_MS = 3500;
@@ -159,8 +169,17 @@
   }
 
   function loadStoredVoiceId() {
-    const stored = safeStorageGet(STORAGE_KEY_VOICE, 'human');
-    return PROFILE_MAP.has(stored) ? stored : 'human';
+    const stored = safeStorageGet(STORAGE_KEY_VOICE, '');
+    const migrated = safeStorageGet(STORAGE_KEY_VOICE_MIGRATED, '');
+    if (!stored) {
+      return DEFAULT_VOICE_ID;
+    }
+    if (stored === 'human' && !migrated) {
+      safeStorageSet(STORAGE_KEY_VOICE, DEFAULT_VOICE_ID);
+      safeStorageSet(STORAGE_KEY_VOICE_MIGRATED, '1');
+      return DEFAULT_VOICE_ID;
+    }
+    return PROFILE_MAP.has(stored) ? stored : DEFAULT_VOICE_ID;
   }
 
   function loadStoredSysVoiceURI() {
@@ -184,6 +203,7 @@
     if (!PROFILE_MAP.has(id)) return getCurrentProfile();
     currentVoiceId = id;
     safeStorageSet(STORAGE_KEY_VOICE, id);
+    safeStorageSet(STORAGE_KEY_VOICE_MIGRATED, '1');
     return getCurrentProfile();
   }
 
@@ -555,7 +575,7 @@
 
     const numChannels = buffer.numberOfChannels || 1;
     const out = ctx.createBuffer(numChannels, trimmedLen, sr);
-    const fadeSamples = Math.min(Math.round(sr * 0.005), Math.floor(trimmedLen / 4));
+    const fadeSamples = Math.min(Math.round(sr * 0.008), Math.floor(trimmedLen / 4));
 
     for (let c = 0; c < numChannels; c += 1) {
       const srcData = buffer.getChannelData(c);
@@ -638,7 +658,7 @@
         localAudioBufferCache.delete(url);
         return null;
       }
-      return { buffer: decoded, gain: 1 };
+      return trimAudioBuffer(ctx, decoded, TRIM_THRESHOLD_DB, TRIM_MARGIN_MS);
     })();
 
     lruSet(localAudioBufferCache, url, promise, MAX_LOCAL_AUDIO_CACHE);
@@ -1013,16 +1033,59 @@
   function preloadChars(chars) {
     const list = Array.isArray(chars) ? chars : Array.from(chars || '');
     if (!list.length) return;
-    // 后台预热汉字音节 + 基础高频笔画音节
-    resolveCharPinyins(list).then((pinyins) => {
-      pinyins.forEach((py) => {
-        if (py) loadHumanSyllableBuffer(py).catch(() => {});
+
+    if (LOCAL_PACK_IDS.has(currentVoiceId)) {
+      const remoteChars = [];
+      list.forEach((ch) => {
+        if (BUILTIN_AUDIO_CHARS.has(ch)) {
+          loadLocalAudioBuffer(encodeLocalAudioPath(currentVoiceId, 'char', ch)).catch(() => {});
+        } else {
+          remoteChars.push(ch);
+        }
       });
-    }).catch(() => {});
+      if (remoteChars.length) {
+        resolveCharPinyins(remoteChars).then((pinyins) => {
+          pinyins.forEach((py) => {
+            if (py) loadHumanSyllableBuffer(py).catch(() => {});
+          });
+        }).catch(() => {});
+      }
+      return;
+    }
 
     if (currentVoiceId === 'human') {
+      // 后台预热汉字音节 + 基础高频笔画音节
+      resolveCharPinyins(list).then((pinyins) => {
+        pinyins.forEach((py) => {
+          if (py) loadHumanSyllableBuffer(py).catch(() => {});
+        });
+      }).catch(() => {});
+
       Object.values(BUILTIN_STROKE_CHAR_PINYIN).forEach((py) => {
         loadHumanSyllableBuffer(py).catch(() => {});
+      });
+    }
+  }
+
+  function preloadStrokes(strokeNames) {
+    const list = Array.isArray(strokeNames) ? strokeNames : [];
+    if (!list.length) return;
+    const unique = Array.from(new Set(list.filter(Boolean)));
+
+    if (LOCAL_PACK_IDS.has(currentVoiceId)) {
+      unique.forEach((name) => {
+        if (BUILTIN_AUDIO_STROKES.has(name)) {
+          loadLocalAudioBuffer(encodeLocalAudioPath(currentVoiceId, 'stroke', name)).catch(() => {});
+        }
+      });
+      return;
+    }
+
+    if (currentVoiceId === 'human') {
+      unique.forEach((name) => {
+        getStrokeSyllables(name).forEach((py) => {
+          if (py) loadHumanSyllableBuffer(py).catch(() => {});
+        });
       });
     }
   }
@@ -1053,7 +1116,7 @@
     }
 
     // 离线降级：若为预设字且有本地包文件则退回本地包，否则系统语音
-    const fallbackPack = LOCAL_PACK_IDS.has(voiceId) ? voiceId : 'xiaoyi';
+    const fallbackPack = LOCAL_PACK_IDS.has(voiceId) ? voiceId : DEFAULT_VOICE_ID;
     if (chars.every((c) => BUILTIN_AUDIO_CHARS.has(c))) {
       const urls = chars.map((ch) => encodeLocalAudioPath(fallbackPack, 'char', ch));
       await playLocalAudioUrls(urls, NAME_CHAR_GAP_SEC, myToken, isCancelledFn);
@@ -1083,9 +1146,9 @@
         const ok = await playHumanSyllableSequence(sylls, STROKE_SYLLABLE_GAP_SEC, myToken);
         if (ok || myToken !== playToken) return;
       }
-      // 离线降级到温暖女声 xiaoyi 本地笔画包
+      // 离线降级到默认自然女声 xiaoxiao 本地笔画包
       if (BUILTIN_AUDIO_STROKES.has(strokeName)) {
-        const url = encodeLocalAudioPath('xiaoyi', 'stroke', strokeName);
+        const url = encodeLocalAudioPath(DEFAULT_VOICE_ID, 'stroke', strokeName);
         const ok = await playLocalAudioUrls([url], 0, myToken);
         if (ok || myToken !== playToken) return;
       }
@@ -1135,6 +1198,7 @@
     unlockAudio,
     stop,
     preloadChars,
+    preloadStrokes,
     speakText,
     speakStroke,
     previewVoice,
@@ -1147,6 +1211,7 @@
       trimAudioBuffer,
       encodeLocalAudioPath,
       playHtmlAudio,
+      loadLocalAudioBuffer,
       loadHumanSyllableBuffer,
       needsAudioResume,
       MAX_SYLLABLE_CACHE,

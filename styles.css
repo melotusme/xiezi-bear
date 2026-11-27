@@ -1331,6 +1331,11 @@ body:has(.modal-backdrop:not(.hidden)) {
   border: 1.5px solid #cbe4f8;
 }
 
+.voice-tag-xiaoxiao {
+  background: #e8f8f0;
+  color: #16794f;
+}
+
 .voice-tag-human {
   background: #fff0e5;
   color: #c85a17;
