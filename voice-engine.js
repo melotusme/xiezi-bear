@@ -87,7 +87,10 @@
   const LOCAL_PACK_IDS = new Set(['yunxia', 'xiaoyi', 'yunxi']);
   const PROFILE_MAP = new Map(VOICE_PROFILES.map((p) => [p.id, p]));
 
-  const CDN_FETCH_TIMEOUT_MS = 4500;
+  const CDN_FETCH_TIMEOUT_MS = 3500;
+  const LOCAL_FETCH_TIMEOUT_MS = 3000;
+  const MAX_SYLLABLE_CACHE = 120;
+  const MAX_LOCAL_AUDIO_CACHE = 64;
   const TRIM_THRESHOLD_DB = -38;
   const TRIM_MARGIN_MS = 20;
   const STROKE_SYLLABLE_GAP_SEC = 0.025;
@@ -98,14 +101,44 @@
 
   let audioCtx = null;
   let audioUnlockBound = false;
+  let audioCtxStateBound = false;
+  let visibilityBound = false;
   let playToken = 0;
   let currentHtmlAudio = null;
+  let activeUtterance = null;
   const activeSources = new Set();
+  const activeCancelFns = new Set();
+  const voiceChangeListeners = new Set();
+  let voicesChangedBound = false;
 
-  // 缓存：{ buffer: AudioBuffer, gain: number } | null
+  // 缓存：{ buffer: AudioBuffer, gain: number } | null（带 LRU 上限）
   const syllableBufferCache = new Map();
   // 缓存成功加载过的直接 URL（用于无 Web Audio 时的 HTMLAudio 降级）
   const syllableUrlCache = new Map();
+  // 缓存本地离线 MP3 解码后的 AudioBuffer（避免 iOS 异步后 HTMLAudio 自动播放受限）
+  const localAudioBufferCache = new Map();
+
+  function isOffline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
+  function lruGet(map, key) {
+    if (!map.has(key)) return undefined;
+    const val = map.get(key);
+    map.delete(key);
+    map.set(key, val);
+    return val;
+  }
+
+  function lruSet(map, key, val, maxSize) {
+    if (map.has(key)) {
+      map.delete(key);
+    } else if (map.size >= maxSize) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
+    }
+    map.set(key, val);
+  }
 
   function safeStorageGet(key, fallback = '') {
     try {
@@ -187,6 +220,39 @@
       }));
   }
 
+  function notifySystemVoicesChanged() {
+    if (!voiceChangeListeners.size) return;
+    const voices = getSystemVoices();
+    voiceChangeListeners.forEach((cb) => {
+      try {
+        cb(voices);
+      } catch (_) {}
+    });
+  }
+
+  function onSystemVoicesChanged(cb) {
+    if (typeof cb !== 'function') return () => {};
+    voiceChangeListeners.add(cb);
+    if (!voicesChangedBound && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      voicesChangedBound = true;
+      const synth = window.speechSynthesis;
+      if (typeof synth.addEventListener === 'function') {
+        synth.addEventListener('voiceschanged', notifySystemVoicesChanged);
+      } else if ('onvoiceschanged' in synth) {
+        const prev = synth.onvoiceschanged;
+        synth.onvoiceschanged = (ev) => {
+          if (typeof prev === 'function') {
+            try { prev.call(synth, ev); } catch (_) {}
+          }
+          notifySystemVoicesChanged();
+        };
+      }
+    }
+    return () => {
+      voiceChangeListeners.delete(cb);
+    };
+  }
+
   function resolveBestSpeechVoice() {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
     const raw = window.speechSynthesis.getVoices() || [];
@@ -200,7 +266,55 @@
     return preferred || zh[0];
   }
 
-  // Web Audio 上下文管理与移动端静音解锁
+  // Web Audio 上下文管理与移动端静音解锁（兼容 iOS Safari suspended / interrupted 状态）
+  function needsAudioResume(ctx) {
+    return Boolean(ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted'));
+  }
+
+  function bindAudioUnlockGestures() {
+    if (typeof document === 'undefined' || audioUnlockBound) return;
+    audioUnlockBound = true;
+
+    const cleanup = () => {
+      if (!audioUnlockBound) return;
+      audioUnlockBound = false;
+      document.removeEventListener('pointerdown', unlock, { capture: true });
+      document.removeEventListener('touchstart', unlock, { capture: true });
+      document.removeEventListener('keydown', unlock, { capture: true });
+    };
+
+    const unlock = () => {
+      try {
+        const c = getAudioCtx();
+        if (!c) return;
+        const playSilentTick = () => {
+          try {
+            const buf = c.createBuffer(1, 1, 22050);
+            const src = c.createBufferSource();
+            src.buffer = buf;
+            src.connect(c.destination);
+            src.start(0);
+          } catch (_) {}
+        };
+        if (needsAudioResume(c)) {
+          c.resume()
+            .then(() => {
+              playSilentTick();
+              if (c.state === 'running') cleanup();
+            })
+            .catch(() => {});
+        } else {
+          playSilentTick();
+          if (c.state === 'running') cleanup();
+        }
+      } catch (_) {}
+    };
+
+    document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    document.addEventListener('touchstart', unlock, { capture: true, passive: true });
+    document.addEventListener('keydown', unlock, { capture: true, passive: true });
+  }
+
   function getAudioCtx() {
     if (typeof window === 'undefined') return null;
     if (!audioCtx) {
@@ -213,7 +327,17 @@
         }
       }
     }
-    if (audioCtx && audioCtx.state === 'suspended') {
+    if (audioCtx && !audioCtxStateBound) {
+      audioCtxStateBound = true;
+      if (typeof audioCtx.addEventListener === 'function') {
+        audioCtx.addEventListener('statechange', () => {
+          if (needsAudioResume(audioCtx)) {
+            bindAudioUnlockGestures();
+          }
+        });
+      }
+    }
+    if (needsAudioResume(audioCtx)) {
       audioCtx.resume().catch(() => {});
     }
     return audioCtx;
@@ -221,48 +345,32 @@
 
   function unlockAudio() {
     const ctx = getAudioCtx();
-    if (typeof document !== 'undefined' && !audioUnlockBound) {
-      audioUnlockBound = true;
-      const unlock = () => {
-        try {
-          const c = getAudioCtx();
-          if (!c) return;
-          const playSilentTick = () => {
-            try {
-              const buf = c.createBuffer(1, 1, 22050);
-              const src = c.createBufferSource();
-              src.buffer = buf;
-              src.connect(c.destination);
-              src.start(0);
-            } catch (_) {}
-          };
-          if (c.state === 'suspended') {
-            c.resume()
-              .then(() => {
-                playSilentTick();
-                if (c.state === 'running') cleanup();
-              })
-              .catch(() => {});
-          } else {
-            playSilentTick();
-            if (c.state === 'running') cleanup();
-          }
-        } catch (_) {}
-      };
-      const cleanup = () => {
-        document.removeEventListener('pointerdown', unlock, { capture: true });
-        document.removeEventListener('touchstart', unlock, { capture: true });
-      };
-      document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
-      document.addEventListener('touchstart', unlock, { capture: true, passive: true });
+    bindAudioUnlockGestures();
+    if (typeof document !== 'undefined' && !visibilityBound) {
+      visibilityBound = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && needsAudioResume(audioCtx)) {
+          audioCtx.resume().catch(() => {});
+          bindAudioUnlockGestures();
+        }
+      });
     }
     return ctx;
   }
 
   function stop() {
     playToken += 1;
+    if (activeCancelFns.size > 0) {
+      const fns = Array.from(activeCancelFns);
+      activeCancelFns.clear();
+      fns.forEach((fn) => {
+        try { fn(); } catch (_) {}
+      });
+    }
     if (currentHtmlAudio) {
       try {
+        currentHtmlAudio.onended = null;
+        currentHtmlAudio.onerror = null;
         currentHtmlAudio.pause();
         currentHtmlAudio.currentTime = 0;
       } catch (_) {}
@@ -276,6 +384,7 @@
       } catch (_) {}
     });
     activeSources.clear();
+    activeUtterance = null;
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -464,21 +573,25 @@
     return { buffer: out, gain };
   }
 
-  async function fetchArrayBufferWithTimeout(url, timeoutMs = CDN_FETCH_TIMEOUT_MS) {
-    if (typeof fetch !== 'function') return null;
+  async function fetchArrayBufferWithTimeout(url, timeoutMs = CDN_FETCH_TIMEOUT_MS, options = {}) {
+    if (typeof fetch !== 'function') return { ok: false, status: 0, buffer: null };
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
     try {
-      const res = await fetch(url, {
-        mode: 'cors',
-        credentials: 'omit',
-        signal: ctrl ? ctrl.signal : undefined
-      });
-      if (!res.ok) return null;
+      const fetchOpts = { signal: ctrl ? ctrl.signal : undefined };
+      if (!options.sameOrigin) {
+        fetchOpts.mode = 'cors';
+        fetchOpts.credentials = 'omit';
+      }
+      const res = await fetch(url, fetchOpts);
+      if (!res.ok) return { ok: false, status: res.status || 0, buffer: null };
       const arr = await res.arrayBuffer();
-      return arr && arr.byteLength > 256 ? arr : null;
+      if (arr && arr.byteLength > 256) {
+        return { ok: true, status: res.status || 200, buffer: arr };
+      }
+      return { ok: false, status: res.status || 200, buffer: null };
     } catch (_) {
-      return null;
+      return { ok: false, status: 0, buffer: null };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -500,27 +613,67 @@
     }
   }
 
-  function loadHumanSyllableBuffer(pinyinNum) {
-    const norm = normalizePinyinNum(pinyinNum);
-    if (!norm) return Promise.resolve(null);
-    if (syllableBufferCache.has(norm)) {
-      return syllableBufferCache.get(norm);
-    }
+  function encodeLocalAudioPath(voiceId, kind, label) {
+    return `audio/${encodeURIComponent(voiceId)}/${kind}_${encodeURIComponent(label)}.mp3`;
+  }
+
+  function loadLocalAudioBuffer(url) {
+    if (!url) return Promise.resolve(null);
+    const cached = lruGet(localAudioBufferCache, url);
+    if (cached) return cached;
 
     const promise = (async () => {
       const ctx = getAudioCtx();
-      const candidates = [
-        ...getAudioCmnUrls(norm),
-        ...getDavinfifieldUrls(norm)
+      if (!ctx) {
+        localAudioBufferCache.delete(url);
+        return null;
+      }
+      const result = await fetchArrayBufferWithTimeout(url, LOCAL_FETCH_TIMEOUT_MS, { sameOrigin: true });
+      if (!result.ok || !result.buffer) {
+        localAudioBufferCache.delete(url);
+        return null;
+      }
+      const decoded = await decodeMp3Buffer(ctx, result.buffer);
+      if (!decoded) {
+        localAudioBufferCache.delete(url);
+        return null;
+      }
+      return { buffer: decoded, gain: 1 };
+    })();
+
+    lruSet(localAudioBufferCache, url, promise, MAX_LOCAL_AUDIO_CACHE);
+    return promise;
+  }
+
+  function loadHumanSyllableBuffer(pinyinNum) {
+    const norm = normalizePinyinNum(pinyinNum);
+    if (!norm) return Promise.resolve(null);
+    const cached = lruGet(syllableBufferCache, norm);
+    if (cached) return cached;
+    if (isOffline()) return Promise.resolve(null);
+
+    const promise = (async () => {
+      const ctx = getAudioCtx();
+      const sourceGroups = [
+        getAudioCmnUrls(norm),
+        getDavinfifieldUrls(norm)
       ];
-      for (const url of candidates) {
-        const arr = await fetchArrayBufferWithTimeout(url);
-        if (!arr) continue;
-        syllableUrlCache.set(norm, url);
-        if (ctx) {
-          const decoded = await decodeMp3Buffer(ctx, arr);
-          if (decoded) {
-            return trimAudioBuffer(ctx, decoded, TRIM_THRESHOLD_DB, TRIM_MARGIN_MS);
+      for (let g = 0; g < sourceGroups.length; g += 1) {
+        const urls = sourceGroups[g];
+        for (let i = 0; i < urls.length; i += 1) {
+          const url = urls[i];
+          const res = await fetchArrayBufferWithTimeout(url, CDN_FETCH_TIMEOUT_MS);
+          if (res.ok && res.buffer) {
+            lruSet(syllableUrlCache, norm, url, MAX_SYLLABLE_CACHE);
+            if (ctx) {
+              const decoded = await decodeMp3Buffer(ctx, res.buffer);
+              if (decoded) {
+                return trimAudioBuffer(ctx, decoded, TRIM_THRESHOLD_DB, TRIM_MARGIN_MS);
+              }
+            }
+          } else if (res.status === 404 && g === 0) {
+            // 同仓库镜像 404 无需重复尝试，直接切换下一音节源
+            break;
           }
         }
       }
@@ -529,7 +682,7 @@
       return null;
     })();
 
-    syllableBufferCache.set(norm, promise);
+    lruSet(syllableBufferCache, norm, promise, MAX_SYLLABLE_CACHE);
     return promise;
   }
 
@@ -540,41 +693,200 @@
         return;
       }
       let settled = false;
+      let timer = null;
+      let audio = null;
+
+      const cleanupAudio = () => {
+        if (!audio) return;
+        const target = audio;
+        audio = null;
+        try {
+          target.onended = null;
+          target.onerror = null;
+          target.pause();
+          target.currentTime = 0;
+        } catch (_) {}
+        if (currentHtmlAudio === target) {
+          currentHtmlAudio = null;
+        }
+      };
+
       const done = (ok) => {
         if (settled) return;
         settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        activeCancelFns.delete(cancel);
         resolve(ok);
       };
+
+      const cancel = () => {
+        cleanupAudio();
+        done(false);
+      };
+
+      activeCancelFns.add(cancel);
+
       try {
-        const audio = new Audio(src);
+        audio = new Audio(src);
         currentHtmlAudio = audio;
-        const timer = setTimeout(() => {
-          if (currentHtmlAudio === audio) currentHtmlAudio = null;
-          done(true);
+        timer = setTimeout(() => {
+          cleanupAudio();
+          done(false);
         }, timeoutMs);
 
         audio.onended = () => {
-          clearTimeout(timer);
-          if (currentHtmlAudio === audio) currentHtmlAudio = null;
+          cleanupAudio();
           done(true);
         };
         audio.onerror = () => {
-          clearTimeout(timer);
-          if (currentHtmlAudio === audio) currentHtmlAudio = null;
+          cleanupAudio();
           done(false);
         };
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
           p.catch(() => {
-            clearTimeout(timer);
-            if (currentHtmlAudio === audio) currentHtmlAudio = null;
+            cleanupAudio();
             done(false);
           });
         }
       } catch (_) {
+        cleanupAudio();
         done(false);
       }
     });
+  }
+
+  async function playWebAudioEntries(ctx, entries, gapSec, myToken, isCancelledFn) {
+    const isCancelled = () => myToken !== playToken || (typeof isCancelledFn === 'function' && isCancelledFn());
+    if (!ctx || !entries.length || isCancelled()) return false;
+
+    if (needsAudioResume(ctx)) {
+      try {
+        await ctx.resume();
+      } catch (_) {}
+    }
+    if (isCancelled()) return true;
+
+    return await new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const created = [];
+      const gainNodes = [];
+
+      const cleanupNodes = () => {
+        created.forEach((s) => {
+          activeSources.delete(s);
+          try {
+            s.onended = null;
+            s.stop();
+          } catch (_) {}
+          try { s.disconnect(); } catch (_) {}
+        });
+        gainNodes.forEach((g) => {
+          try { g.disconnect(); } catch (_) {}
+        });
+      };
+
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        activeCancelFns.delete(cancel);
+        resolve(ok);
+      };
+
+      const cancel = () => {
+        cleanupNodes();
+        finish(false);
+      };
+
+      activeCancelFns.add(cancel);
+
+      const startAt = ctx.currentTime + 0.015;
+      let cursor = startAt;
+      let remaining = entries.length;
+
+      for (let i = 0; i < entries.length; i += 1) {
+        const { buffer, gain } = entries[i];
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+
+        let gainNode = null;
+        if (gain !== 1) {
+          gainNode = ctx.createGain();
+          gainNode.gain.setValueAtTime(gain, cursor);
+          src.connect(gainNode);
+          gainNode.connect(ctx.destination);
+          gainNodes.push(gainNode);
+        } else {
+          src.connect(ctx.destination);
+        }
+
+        activeSources.add(src);
+        created.push(src);
+
+        src.onended = () => {
+          activeSources.delete(src);
+          try { src.disconnect(); } catch (_) {}
+          if (gainNode) {
+            try { gainNode.disconnect(); } catch (_) {}
+          }
+          remaining -= 1;
+          if (remaining <= 0) finish(true);
+        };
+
+        try {
+          src.start(cursor);
+        } catch (_) {
+          activeSources.delete(src);
+          try { src.disconnect(); } catch (_) {}
+          if (gainNode) {
+            try { gainNode.disconnect(); } catch (_) {}
+          }
+          remaining -= 1;
+        }
+        cursor += buffer.duration + gapSec;
+      }
+
+      if (remaining <= 0) {
+        finish(true);
+        return;
+      }
+
+      const totalMs = Math.max(400, Math.round((cursor - startAt) * 1000) + 350);
+      timer = setTimeout(() => {
+        cleanupNodes();
+        finish(true);
+      }, totalMs);
+    });
+  }
+
+  async function playLocalAudioUrls(urls, gapSec, myToken, isCancelledFn) {
+    const isCancelled = () => myToken !== playToken || (typeof isCancelledFn === 'function' && isCancelledFn());
+    if (!urls || !urls.length || isCancelled()) return false;
+
+    const ctx = getAudioCtx();
+    if (ctx) {
+      const entries = await Promise.all(urls.map((u) => loadLocalAudioBuffer(u)));
+      if (isCancelled()) return true;
+      if (entries.every((e) => e && e.buffer)) {
+        return await playWebAudioEntries(ctx, entries, gapSec, myToken, isCancelledFn);
+      }
+    }
+
+    // 降级到 HTMLAudio（如 file:// 协议下 fetch 被阻止）
+    for (let i = 0; i < urls.length; i += 1) {
+      if (isCancelled()) return true;
+      const ok = await playHtmlAudio(urls[i], myToken, 1800);
+      if (!ok) return false;
+    }
+    return true;
   }
 
   async function playHumanSyllableSequence(syllables, gapSec, myToken, isCancelledFn) {
@@ -584,7 +896,7 @@
 
     const ctx = getAudioCtx();
     if (ctx) {
-      if (ctx.state === 'suspended') {
+      if (needsAudioResume(ctx)) {
         try {
           await ctx.resume();
         } catch (_) {}
@@ -593,78 +905,26 @@
       if (isCancelled()) return true;
 
       if (entries.every((e) => e && e.buffer)) {
-        return await new Promise((resolve) => {
-          let settled = false;
-          const finish = (ok) => {
-            if (settled) return;
-            settled = true;
-            resolve(ok);
-          };
-
-          const startAt = ctx.currentTime + 0.015;
-          let cursor = startAt;
-          let remaining = entries.length;
-          const created = [];
-
-          for (let i = 0; i < entries.length; i += 1) {
-            const { buffer, gain } = entries[i];
-            const src = ctx.createBufferSource();
-            src.buffer = buffer;
-
-            if (gain !== 1) {
-              const gainNode = ctx.createGain();
-              gainNode.gain.setValueAtTime(gain, cursor);
-              src.connect(gainNode);
-              gainNode.connect(ctx.destination);
-            } else {
-              src.connect(ctx.destination);
-            }
-
-            activeSources.add(src);
-            created.push(src);
-
-            src.onended = () => {
-              activeSources.delete(src);
-              remaining -= 1;
-              if (remaining <= 0) finish(true);
-            };
-
-            try {
-              src.start(cursor);
-            } catch (_) {
-              activeSources.delete(src);
-              remaining -= 1;
-            }
-            cursor += buffer.duration + gapSec;
-          }
-
-          if (remaining <= 0) {
-            finish(true);
-            return;
-          }
-
-          const totalMs = Math.max(400, Math.round((cursor - startAt) * 1000) + 350);
-          setTimeout(() => {
-            created.forEach((s) => activeSources.delete(s));
-            finish(true);
-          }, totalMs);
-        });
+        return await playWebAudioEntries(ctx, entries, gapSec, myToken, isCancelledFn);
       }
     }
+
+    if (isOffline()) return false;
 
     // 若无 Web Audio 或解码失败，尝试直接用 HTMLAudio 播放已验证 URL
     let playedAny = false;
     for (const sy of syllables) {
       if (isCancelled()) return true;
-      const urls = syllableUrlCache.has(sy)
-        ? [syllableUrlCache.get(sy)]
+      const cachedUrl = lruGet(syllableUrlCache, sy);
+      const urls = cachedUrl
+        ? [cachedUrl]
         : [...getAudioCmnUrls(sy), ...getDavinfifieldUrls(sy)];
       let ok = false;
       for (const u of urls) {
         if (isCancelled()) return true;
         ok = await playHtmlAudio(u, myToken, 1800);
         if (ok) {
-          syllableUrlCache.set(sy, u);
+          lruSet(syllableUrlCache, sy, u, MAX_SYLLABLE_CACHE);
           playedAny = true;
           break;
         }
@@ -681,14 +941,41 @@
         return;
       }
       let settled = false;
+      let fallbackTimer = null;
+      let speakDelayTimer = null;
+
       const done = () => {
         if (settled) return;
         settled = true;
+        if (fallbackTimer) {
+          clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+        }
+        if (speakDelayTimer) {
+          clearTimeout(speakDelayTimer);
+          speakDelayTimer = null;
+        }
+        activeCancelFns.delete(cancel);
+        if (activeUtterance === utter) {
+          activeUtterance = null;
+        }
         resolve();
       };
+
+      const cancel = () => {
+        done();
+      };
+
+      activeCancelFns.add(cancel);
+
+      let utter = null;
       try {
-        window.speechSynthesis.cancel();
-        const utter = new SpeechSynthesisUtterance(text);
+        const synth = window.speechSynthesis;
+        const needsCancel = Boolean(synth.speaking || synth.pending);
+        if (needsCancel) {
+          synth.cancel();
+        }
+        utter = new SpeechSynthesisUtterance(text);
         utter.lang = 'zh-CN';
         const best = resolveBestSpeechVoice();
         if (best) utter.voice = best;
@@ -696,8 +983,27 @@
         utter.pitch = 1.0;
         utter.onend = done;
         utter.onerror = done;
-        window.speechSynthesis.speak(utter);
-        setTimeout(done, Math.max(1800, text.length * 700));
+        activeUtterance = utter;
+
+        const doSpeak = () => {
+          if (settled || myToken !== playToken) {
+            done();
+            return;
+          }
+          try {
+            synth.speak(utter);
+            fallbackTimer = setTimeout(done, Math.max(1800, text.length * 700));
+          } catch (_) {
+            done();
+          }
+        };
+
+        // 规避 Chromium 同步 cancel() + speak() 偶发吞音
+        if (needsCancel) {
+          speakDelayTimer = setTimeout(doSpeak, 20);
+        } else {
+          doSpeak();
+        }
       } catch (_) {
         done();
       }
@@ -731,14 +1037,11 @@
       return;
     }
 
-    // 本地语音包（yunxia / xiaoyi / yunxi）：若全部属于 14 个内置预设字，直接播放同音色本地 MP3
+    // 本地语音包（yunxia / xiaoyi / yunxi）：若全部属于 14 个内置预设字，直接播放同音色本地 MP3（优先 Web Audio 缓冲）
     if (LOCAL_PACK_IDS.has(voiceId) && chars.every((c) => BUILTIN_AUDIO_CHARS.has(c))) {
-      for (const ch of chars) {
-        if (isCancelled()) return;
-        const ok = await playHtmlAudio(`audio/${voiceId}/char_${ch}.mp3`, myToken, 1600);
-        if (!ok) break;
-      }
-      return;
+      const urls = chars.map((ch) => encodeLocalAudioPath(voiceId, 'char', ch));
+      const ok = await playLocalAudioUrls(urls, NAME_CHAR_GAP_SEC, myToken, isCancelledFn);
+      if (ok || isCancelled()) return;
     }
 
     // 开源真人模式（以及本地包遇到非预设任意汉字时）：统一使用开源真人 Shtooka 音节库无缝拼接
@@ -749,13 +1052,11 @@
       if (ok || isCancelled()) return;
     }
 
-    // 离线降级：若为单字且有本地包文件则退回 xiaoyi，否则系统语音
+    // 离线降级：若为预设字且有本地包文件则退回本地包，否则系统语音
     const fallbackPack = LOCAL_PACK_IDS.has(voiceId) ? voiceId : 'xiaoyi';
     if (chars.every((c) => BUILTIN_AUDIO_CHARS.has(c))) {
-      for (const ch of chars) {
-        if (isCancelled()) return;
-        await playHtmlAudio(`audio/${fallbackPack}/char_${ch}.mp3`, myToken, 1600);
-      }
+      const urls = chars.map((ch) => encodeLocalAudioPath(fallbackPack, 'char', ch));
+      await playLocalAudioUrls(urls, NAME_CHAR_GAP_SEC, myToken, isCancelledFn);
       return;
     }
 
@@ -771,7 +1072,8 @@
     }
 
     if (LOCAL_PACK_IDS.has(voiceId) && BUILTIN_AUDIO_STROKES.has(strokeName)) {
-      const ok = await playHtmlAudio(`audio/${voiceId}/stroke_${strokeName}.mp3`, myToken, 1800);
+      const url = encodeLocalAudioPath(voiceId, 'stroke', strokeName);
+      const ok = await playLocalAudioUrls([url], 0, myToken);
       if (ok || myToken !== playToken) return;
     }
 
@@ -783,7 +1085,8 @@
       }
       // 离线降级到温暖女声 xiaoyi 本地笔画包
       if (BUILTIN_AUDIO_STROKES.has(strokeName)) {
-        const ok = await playHtmlAudio(`audio/xiaoyi/stroke_${strokeName}.mp3`, myToken, 1800);
+        const url = encodeLocalAudioPath('xiaoyi', 'stroke', strokeName);
+        const ok = await playLocalAudioUrls([url], 0, myToken);
         if (ok || myToken !== playToken) return;
       }
     }
@@ -825,6 +1128,7 @@
     getVoiceId,
     setVoiceId,
     getSystemVoices,
+    onSystemVoicesChanged,
     getSystemVoiceURI,
     setSystemVoiceURI,
     getAudioCtx,
@@ -841,8 +1145,19 @@
       getDavinfifieldUrls,
       getStrokeSyllables,
       trimAudioBuffer,
+      encodeLocalAudioPath,
+      playHtmlAudio,
+      loadHumanSyllableBuffer,
+      needsAudioResume,
+      MAX_SYLLABLE_CACHE,
+      MAX_LOCAL_AUDIO_CACHE,
       BUILTIN_AUDIO_CHARS,
-      BUILTIN_AUDIO_STROKES
+      BUILTIN_AUDIO_STROKES,
+      clearCaches: () => {
+        syllableBufferCache.clear();
+        syllableUrlCache.clear();
+        localAudioBufferCache.clear();
+      }
     }
   };
 

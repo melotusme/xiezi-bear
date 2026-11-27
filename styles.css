@@ -7,15 +7,19 @@
   --paper-warm: #fff7e9;
 
   --coral: #ff7477;
-  --coral-lip: #e05256;
+  --coral-btn: #d63b40;
+  --coral-lip: #b32b30;
   --butter: #ffd86b;
   --butter-lip: #dfb030;
   --mint: #4cd2a4;
   --mint-lip: #2ca87e;
+  --mint-ink: #134232;
   --sky: #5cb8f5;
   --sky-lip: #3693d1;
+  --sky-ink: #103754;
   --peach: #ffad7a;
   --peach-lip: #df844c;
+  --peach-ink: #4a220c;
   --cream-btn: #fff9ef;
   --cream-lip: #e3cfb8;
 
@@ -270,9 +274,11 @@ select:focus-visible,
   white-space: nowrap;
 }
 
-.toy-btn:hover {
-  transform: translateY(-2px);
-  filter: brightness(1.03);
+@media (hover: hover) {
+  .toy-btn:hover {
+    transform: translateY(-2px);
+    filter: brightness(1.03);
+  }
 }
 
 .toy-btn:active {
@@ -286,7 +292,7 @@ select:focus-visible,
 }
 
 .btn-coral {
-  background: var(--coral);
+  background: var(--coral-btn);
   color: #ffffff;
   border-bottom: 4px solid var(--coral-lip);
 }
@@ -299,19 +305,19 @@ select:focus-visible,
 
 .btn-mint {
   background: var(--mint);
-  color: #ffffff;
+  color: var(--mint-ink);
   border-bottom: 4px solid var(--mint-lip);
 }
 
 .btn-sky {
   background: var(--sky);
-  color: #ffffff;
+  color: var(--sky-ink);
   border-bottom: 4px solid var(--sky-lip);
 }
 
 .btn-peach {
   background: var(--peach);
-  color: #ffffff;
+  color: var(--peach-ink);
   border-bottom: 4px solid var(--peach-lip);
 }
 
@@ -349,8 +355,9 @@ select:focus-visible,
 
 .char-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 14px;
+  min-height: 82px;
 }
 
 .char-tab {
@@ -369,8 +376,14 @@ select:focus-visible,
   transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.16s ease, background 0.16s ease;
 }
 
-.char-tab:hover {
-  transform: translateY(-3px);
+@media (hover: hover) {
+  .char-tab:hover {
+    transform: translateY(-3px);
+  }
+}
+
+.char-tab:active {
+  transform: translateY(1px) scale(0.98);
 }
 
 .char-tab.active {
@@ -559,8 +572,14 @@ select:focus-visible,
   transition: transform 0.14s ease;
 }
 
-.circle-speaker-btn:hover {
-  transform: scale(1.08);
+@media (hover: hover) {
+  .circle-speaker-btn:hover {
+    transform: scale(1.08);
+  }
+}
+
+.circle-speaker-btn:active {
+  transform: scale(0.94);
 }
 
 .circle-speaker-btn svg {
@@ -628,16 +647,20 @@ select:focus-visible,
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%) translateY(10px);
+  max-width: calc(100% - 20px);
   background: rgba(62, 46, 38, 0.92);
   color: #ffffff;
   padding: 8px 16px;
   border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 800;
+  line-height: 1.3;
+  text-align: center;
+  text-wrap: balance;
+  white-space: normal;
   opacity: 0;
   pointer-events: none;
   z-index: 5;
-  white-space: nowrap;
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
@@ -736,8 +759,32 @@ select:focus-visible,
   opacity: 1;
 }
 
+.bear-mascot .paw-left,
+.bear-mascot .paw-right {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.bear-mascot.state-happy .paw-left {
+  animation: pawWaveLeft 0.55s ease-in-out 2;
+}
+
+.bear-mascot.state-happy .paw-right {
+  animation: pawWaveRight 0.55s ease-in-out 2;
+}
+
 .bear-mascot.state-encourage {
   animation: bearTilt 0.6s ease-in-out 1;
+}
+
+@keyframes pawWaveLeft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+
+@keyframes pawWaveRight {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
 }
 
 @keyframes bearBlink {
@@ -856,9 +903,10 @@ select:focus-visible,
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(66px, 1fr));
   gap: 8px;
+  min-height: 82px;
   max-height: 292px;
   overflow-y: auto;
-  padding: 2px;
+  padding: 6px;
 }
 
 .stroke-step-card {
@@ -876,9 +924,15 @@ select:focus-visible,
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
 }
 
-.stroke-step-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--sky);
+@media (hover: hover) {
+  .stroke-step-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--sky);
+  }
+}
+
+.stroke-step-card:active {
+  transform: translateY(1px) scale(0.97);
 }
 
 .stroke-step-card.active {
@@ -917,6 +971,10 @@ select:focus-visible,
 }
 
 /* 弹窗 & 换名字抽屉 */
+body:has(.modal-backdrop:not(.hidden)) {
+  overflow: hidden;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -978,6 +1036,17 @@ select:focus-visible,
   place-items: center;
   cursor: pointer;
   flex-shrink: 0;
+  transition: transform 0.14s ease, background 0.14s ease;
+}
+
+@media (hover: hover) {
+  .modal-close-btn:hover {
+    background: #ffecd2;
+  }
+}
+
+.modal-close-btn:active {
+  transform: scale(0.93);
 }
 
 .modal-close-btn svg {
@@ -1023,8 +1092,8 @@ select:focus-visible,
 .saved-name-pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px 8px 16px;
+  gap: 10px;
+  padding: 8px 8px 8px 16px;
   border-radius: 999px;
   border: 2px solid #cbe4f8;
   border-bottom-width: 4px;
@@ -1037,9 +1106,15 @@ select:focus-visible,
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
 }
 
-.saved-name-pill:hover {
-  transform: translateY(-2px);
-  border-color: var(--sky);
+@media (hover: hover) {
+  .saved-name-pill:hover {
+    transform: translateY(-2px);
+    border-color: var(--sky);
+  }
+}
+
+.saved-name-pill:active {
+  transform: translateY(1px) scale(0.98);
 }
 
 .saved-name-pill.active {
@@ -1050,22 +1125,31 @@ select:focus-visible,
 
 .saved-name-del {
   position: relative;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   border: none;
   background: rgba(62, 46, 38, 0.1);
   color: var(--ink-soft);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
   font-weight: 900;
   cursor: pointer;
   display: grid;
   place-items: center;
+  flex-shrink: 0;
 }
 
-.saved-name-del:hover {
-  background: var(--coral);
+@media (hover: hover) {
+  .saved-name-del:hover {
+    background: var(--coral-btn);
+    color: #ffffff;
+  }
+}
+
+.saved-name-del:active {
+  background: var(--coral-btn);
   color: #ffffff;
+  transform: scale(0.92);
 }
 
 .saved-empty-hint {
@@ -1130,10 +1214,16 @@ select:focus-visible,
   transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
 }
 
-.char-chip:hover {
-  transform: translateY(-2px);
-  border-color: var(--butter-lip);
-  background: #fff2d1;
+@media (hover: hover) {
+  .char-chip:hover {
+    transform: translateY(-2px);
+    border-color: var(--butter-lip);
+    background: #fff2d1;
+  }
+}
+
+.char-chip:active {
+  transform: translateY(1px) scale(0.95);
 }
 
 .char-chip.in-name {
@@ -1174,10 +1264,16 @@ select:focus-visible,
   transition: transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
 }
 
-.voice-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--sky);
-  background: #f9fdff;
+@media (hover: hover) {
+  .voice-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--sky);
+    background: #f9fdff;
+  }
+}
+
+.voice-card:active {
+  transform: translateY(1px) scale(0.99);
 }
 
 .voice-card.active {
@@ -1329,10 +1425,12 @@ select:focus-visible,
   flex-shrink: 0;
 }
 
-.voice-preview-btn:hover {
-  transform: translateY(-1px);
-  background: #dff2ff;
-  border-color: var(--sky);
+@media (hover: hover) {
+  .voice-preview-btn:hover {
+    transform: translateY(-1px);
+    background: #dff2ff;
+    border-color: var(--sky);
+  }
 }
 
 .voice-preview-btn:active {
@@ -1342,7 +1440,7 @@ select:focus-visible,
 .voice-preview-btn.is-previewing {
   background: var(--sky);
   border-color: var(--sky-lip);
-  color: #ffffff;
+  color: var(--sky-ink);
 }
 
 .system-voice-section {
@@ -1386,7 +1484,14 @@ select:focus-visible,
 /* 演示 & 庆祝弹窗 */
 .showcase-sheet,
 .celebrate-sheet {
+  position: relative;
   text-align: center;
+}
+
+.celebrate-close-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
 }
 
 .modal-desc {
@@ -1399,14 +1504,15 @@ select:focus-visible,
 .showcase-grid {
   display: flex;
   justify-content: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 12px;
   margin-bottom: 18px;
 }
 
 .showcase-box {
-  container-type: inline-size;
-  width: min(150px, calc((100vw - 88px) / 3));
+  flex: 0 1 150px;
+  width: min(150px, calc((100% - 24px) / 3));
+  min-width: 0;
   aspect-ratio: 1 / 1;
   height: auto;
   border: 3px solid #ff9f89;
@@ -1420,18 +1526,6 @@ select:focus-visible,
   display: block;
   width: 100%;
   height: 100%;
-}
-
-.showcase-box > svg[width="144"]:not([viewBox]) {
-  width: 144px;
-  height: 144px;
-  transform-origin: top left;
-}
-
-@supports (transform: scale(tan(atan2(100cqi, 144px)))) {
-  .showcase-box > svg[width="144"]:not([viewBox]) {
-    transform: scale(tan(atan2(100cqi, 144px)));
-  }
 }
 
 .trophy-illustration {
@@ -1466,40 +1560,6 @@ select:focus-visible,
   gap: 12px;
 }
 
-/* 触控屏大热区优化 */
-@media (pointer: coarse) {
-  .toy-btn,
-  .mode-tab,
-  .saved-name-pill,
-  .voice-preview-btn,
-  .system-voice-select {
-    min-height: 44px;
-  }
-
-  .voice-card {
-    min-height: 68px;
-  }
-
-  .circle-speaker-btn,
-  .modal-close-btn {
-    width: 44px;
-    height: 44px;
-  }
-
-  .link-clear-btn {
-    min-height: 44px;
-    display: inline-flex;
-    align-items: center;
-    padding: 6px 10px;
-  }
-
-  .saved-name-del::after {
-    content: "";
-    position: absolute;
-    inset: -10px;
-  }
-}
-
 /* 响应式适配 */
 @media (max-width: 840px) {
   .notebook-body {
@@ -1515,14 +1575,15 @@ select:focus-visible,
 
 @media (max-width: 560px) {
   .app-shell {
-    padding: calc(12px + env(safe-area-inset-top, 0px))
+    padding: calc(10px + env(safe-area-inset-top, 0px))
       calc(10px + env(safe-area-inset-right, 0px))
-      calc(36px + env(safe-area-inset-bottom, 0px))
+      calc(32px + env(safe-area-inset-bottom, 0px))
       calc(10px + env(safe-area-inset-left, 0px));
   }
 
   .top-bar {
-    gap: 10px;
+    gap: 8px;
+    margin-bottom: 10px;
   }
 
   .top-actions {
@@ -1533,6 +1594,15 @@ select:focus-visible,
   .top-actions .toy-btn {
     padding: 8px 11px;
     font-size: 0.84rem;
+  }
+
+  .top-actions .icon-only-sm {
+    min-width: 44px;
+    padding: 8px 10px;
+  }
+
+  .top-actions .icon-only-sm #sound-label {
+    display: none;
   }
 
   .voice-btn-badge {
@@ -1562,21 +1632,21 @@ select:focus-visible,
   }
 
   .brand-badge {
-    width: 44px;
-    height: 44px;
+    width: 42px;
+    height: 42px;
   }
 
   .brand-badge svg {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
 
   .title-block h1 {
-    font-size: 1.18rem;
+    font-size: 1.15rem;
   }
 
   .toy-btn {
-    min-height: 42px;
+    min-height: 44px;
     padding: 9px 13px;
     font-size: 0.88rem;
   }
@@ -1586,8 +1656,13 @@ select:focus-visible,
     padding: 10px 12px;
   }
 
+  .name-selector-strip {
+    margin-bottom: 14px;
+  }
+
   .char-tabs {
     gap: 8px;
+    min-height: 90px;
   }
 
   .char-tab {
@@ -1606,7 +1681,7 @@ select:focus-visible,
   }
 
   .notebook-stage {
-    padding: 22px 12px 18px;
+    padding: 20px 12px 16px;
     border-radius: 26px;
   }
 
@@ -1618,10 +1693,6 @@ select:focus-visible,
   .notebook-rings span {
     width: 14px;
     height: 22px;
-  }
-
-  .writing-grid {
-    width: min(336px, 100%);
   }
 
   .stroke-live-pill {
@@ -1648,8 +1719,13 @@ select:focus-visible,
   }
 
   .modal-sheet {
-    padding: 18px 16px calc(20px + env(safe-area-inset-bottom, 0px));
+    padding: 18px 16px 20px;
     border-radius: 26px;
+  }
+
+  .celebrate-close-btn {
+    top: 12px;
+    right: 12px;
   }
 
   .showcase-grid {
@@ -1657,7 +1733,98 @@ select:focus-visible,
   }
 
   .showcase-box {
-    width: min(144px, calc((100vw - 80px) / 3));
+    width: min(144px, calc((100% - 16px) / 3));
     border-radius: 16px;
+  }
+}
+
+/* 短屏 / 横屏平板适配：保证写字格与按钮同屏可见 */
+@media (max-height: 640px) and (orientation: landscape) {
+  .app-shell {
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .top-bar {
+    margin-bottom: 10px;
+  }
+
+  .name-selector-strip {
+    margin-bottom: 12px;
+  }
+
+  .notebook-stage {
+    padding: 20px 18px 16px;
+  }
+
+  .writing-grid {
+    width: min(260px, 52dvh, 100%);
+  }
+
+  .canvas-wrapper {
+    margin-bottom: 12px;
+  }
+}
+
+/* 触控屏大热区优化（置于窄屏断点之后，确保 44px+ 规则不被覆盖） */
+@media (pointer: coarse) {
+  .toy-btn,
+  .mode-tab,
+  .saved-name-pill,
+  .voice-preview-btn,
+  .system-voice-select {
+    min-height: 44px;
+  }
+
+  .voice-card {
+    min-height: 68px;
+  }
+
+  .circle-speaker-btn,
+  .modal-close-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .link-clear-btn {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+  }
+
+  .saved-name-del {
+    width: 30px;
+    height: 30px;
+  }
+
+  .saved-name-del::after {
+    content: "";
+    position: absolute;
+    inset: -7px -8px -7px -4px;
+  }
+}
+
+/* 尊重用户减少动态效果偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .cloud,
+  .sun-decor,
+  .bear-mascot,
+  .bear-mascot .eyes-normal,
+  .bear-mascot .paw-left,
+  .bear-mascot .paw-right,
+  .next-char-cta,
+  .modal-sheet,
+  .trophy-illustration {
+    animation: none !important;
   }
 }

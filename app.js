@@ -7,18 +7,10 @@
     '天', '文', '星', '一', '宝'
   ];
 
-  const BUILTIN_AUDIO_CHARS = new Set(PRESET_CHARS);
-  const BUILTIN_AUDIO_STROKES = new Set([
-    '横', '竖', '撇', '捺', '点', '提',
-    '竖钩', '横折', '横钩', '横折钩', '撇折', '撇点',
-    '竖弯钩', '横撇', '竖提', '横折提', '折笔',
-    '卧钩', '斜钩', '弯钩', '竖折', '竖弯',
-    '竖折折钩', '横折弯钩', '横折折撇', '横撇弯钩', '横斜钩'
-  ]);
-
   const DEFAULT_SAVED_NAMES = ['王小明', '李小红', '张小华', '林小乐'];
   const STORAGE_KEY_SAVED = 'hanzi_name_saved_list_v1';
   const STORAGE_KEY_LAST = 'hanzi_name_last_active_v1';
+  const STORAGE_KEY_PREFS = 'hanzi_name_prefs_v1';
 
   const CHAR_META = {
     '王': { pinyin: 'wáng', tip: '三横间距均匀，底横最长', strokes: ['横', '横', '竖', '横'] },
@@ -50,6 +42,10 @@
     return Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   }
 
+  function prefersReducedMotion() {
+    return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
   const state = {
     nameChars: ['王', '小', '明'],
     activeIndex: 0,
@@ -60,12 +56,16 @@
     completed: new Set(),
     writer: null,
     charData: null,
+    loadedChar: '',
+    preparedCharData: null,
+    strokeVertInfos: [],
     currentStepIndex: -1,
     loadToken: 0,
     animToken: 0,
     animStatus: 'idle', // 'idle' | 'playing' | 'paused'
     pauseRequested: false,
     resumeIndex: 0,
+    activeStrokeResolve: null,
     chipBufferMode: false,
     showcaseWriters: [],
     savedNames: [],
@@ -147,6 +147,7 @@
     celebrateName: document.getElementById('celebrate-name'),
     practiceAgainBtn: document.getElementById('practice-again-btn'),
     closeCelebrateBtn: document.getElementById('close-celebrate-btn'),
+    dismissCelebrateBtn: document.getElementById('dismiss-celebrate-btn'),
     confettiCanvas: document.getElementById('confetti-canvas')
   };
 
@@ -167,72 +168,33 @@
     }
   }
 
-  // Web Audio 轻音效（优先复用 VoiceEngine 共享 AudioContext 及移动端解锁）
-  let audioCtx = null;
-  let audioUnlockBound = false;
+  // Web Audio 轻音效（复用 VoiceEngine 共享 AudioContext 及移动端解锁）
+  let fallbackAudioCtx = null;
 
   function getAudioCtx() {
     if (window.VoiceEngine && typeof window.VoiceEngine.getAudioCtx === 'function') {
       return window.VoiceEngine.getAudioCtx();
     }
-    if (!audioCtx) {
+    if (!fallbackAudioCtx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (Ctx) {
         try {
-          audioCtx = new Ctx();
+          fallbackAudioCtx = new Ctx();
         } catch (_) {
-          audioCtx = null;
+          fallbackAudioCtx = null;
         }
       }
     }
-    if (audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
+    if (fallbackAudioCtx && fallbackAudioCtx.state === 'suspended') {
+      fallbackAudioCtx.resume().catch(() => {});
     }
-    return audioCtx;
+    return fallbackAudioCtx;
   }
 
   function setupMobileAudioUnlock() {
     if (window.VoiceEngine && typeof window.VoiceEngine.unlockAudio === 'function') {
       window.VoiceEngine.unlockAudio();
-      return;
     }
-    if (audioUnlockBound || typeof document === 'undefined') return;
-    audioUnlockBound = true;
-
-    const unlock = () => {
-      try {
-        const ctx = getAudioCtx();
-        if (!ctx) return;
-        const playSilentTick = () => {
-          try {
-            const buf = ctx.createBuffer(1, 1, 22050);
-            const src = ctx.createBufferSource();
-            src.buffer = buf;
-            src.connect(ctx.destination);
-            src.start(0);
-          } catch (_) {}
-        };
-        if (ctx.state === 'suspended') {
-          ctx.resume()
-            .then(() => {
-              playSilentTick();
-              if (ctx.state === 'running') cleanup();
-            })
-            .catch(() => {});
-        } else {
-          playSilentTick();
-          if (ctx.state === 'running') cleanup();
-        }
-      } catch (_) {}
-    };
-
-    const cleanup = () => {
-      document.removeEventListener('pointerdown', unlock, { capture: true });
-      document.removeEventListener('touchstart', unlock, { capture: true });
-    };
-
-    document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
-    document.addEventListener('touchstart', unlock, { capture: true, passive: true });
   }
 
   function playTone(freq, duration = 0.12, type = 'sine', gainVal = 0.12, delay = 0) {
@@ -270,91 +232,41 @@
     notes.forEach((n, i) => playTone(n, 0.2, 'triangle', 0.14, i * 0.09));
   }
 
-  // 多音色语音播放（优先委托给 window.VoiceEngine，支持 5 档音色与开源真人读音）
-  let currentAudio = null;
-
+  // 多音色语音播放（委托给 window.VoiceEngine，缺少时退回最小浏览器 TTS 兜底）
   function stopCurrentAudio() {
     if (window.VoiceEngine && typeof window.VoiceEngine.stop === 'function') {
       window.VoiceEngine.stop();
     }
-    if (currentAudio) {
-      try {
-        currentAudio.pause();
-        currentAudio.currentTime = 0;
-      } catch (_) {}
-      currentAudio = null;
-    }
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch (_) {}
     }
   }
 
-  function getBestChineseVoice() {
-    if (!('speechSynthesis' in window)) return null;
-    const voices = window.speechSynthesis.getVoices() || [];
-    const zhVoices = voices.filter((v) => /zh|cmn/i.test(v.lang));
-    if (!zhVoices.length) return null;
-    const preferred = zhVoices.find((v) => /Xiaoxiao|Xiaoyi|Yunxi|Natural|Online|Google/i.test(v.name));
-    return preferred || zhVoices[0];
-  }
-
-  function playAudioClip(src, timeoutMs = 2200) {
-    return new Promise((resolve) => {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      try {
-        const audio = new Audio(src);
-        currentAudio = audio;
-        audio.onended = () => {
-          if (currentAudio === audio) currentAudio = null;
-          done();
-        };
-        audio.onerror = () => {
-          if (currentAudio === audio) currentAudio = null;
-          done();
-        };
-        const p = audio.play();
-        if (p && typeof p.catch === 'function') {
-          p.catch(() => {
-            if (currentAudio === audio) currentAudio = null;
-            done();
-          });
-        }
-        setTimeout(done, timeoutMs);
-      } catch (_) {
-        done();
-      }
-    });
-  }
-
-  function speakWithBrowserTTS(text, rate = 0.9) {
+  function speakFallbackTTS(text, rate = 0.92) {
     return new Promise((resolve) => {
       if (!('speechSynthesis' in window) || !text) {
         resolve();
         return;
       }
       let settled = false;
+      let timer = null;
       const done = () => {
         if (settled) return;
         settled = true;
+        if (timer) clearTimeout(timer);
         resolve();
       };
       try {
         window.speechSynthesis.cancel();
         const utter = new SpeechSynthesisUtterance(text);
         utter.lang = 'zh-CN';
-        const bestVoice = getBestChineseVoice();
-        if (bestVoice) utter.voice = bestVoice;
         utter.rate = rate;
-        utter.pitch = 1.05;
         utter.onend = done;
         utter.onerror = done;
+        timer = setTimeout(done, 1800);
         window.speechSynthesis.speak(utter);
-        setTimeout(done, 1800);
       } catch (_) {
         done();
       }
@@ -377,21 +289,7 @@
       await window.VoiceEngine.speakText(text, () => myToken !== state.animToken);
       return;
     }
-    stopCurrentAudio();
-    const chars = Array.from(text || '');
-    if (chars.length === 1 && BUILTIN_AUDIO_CHARS.has(chars[0])) {
-      await playAudioClip(`audio/xiaoyi/char_${chars[0]}.mp3`);
-      return;
-    }
-    if (chars.length > 1 && chars.every((c) => BUILTIN_AUDIO_CHARS.has(c))) {
-      const myToken = state.animToken;
-      for (const c of chars) {
-        if (myToken !== state.animToken) return;
-        await playAudioClip(`audio/xiaoyi/char_${c}.mp3`);
-      }
-      return;
-    }
-    await speakWithBrowserTTS(text, 0.88);
+    await speakFallbackTTS(text, 0.88);
   }
 
   function speakStrokeSync(strokeName) {
@@ -401,11 +299,7 @@
     if (window.VoiceEngine && typeof window.VoiceEngine.speakStroke === 'function') {
       return window.VoiceEngine.speakStroke(strokeName);
     }
-    stopCurrentAudio();
-    if (BUILTIN_AUDIO_STROKES.has(strokeName)) {
-      return playAudioClip(`audio/xiaoyi/stroke_${strokeName}.mp3`, 1800);
-    }
-    return speakWithBrowserTTS(strokeName, 1.0);
+    return speakFallbackTTS(strokeName, 1.0);
   }
 
   function updatePlayButtonUI() {
@@ -429,14 +323,36 @@
     }
   }
 
+  function updateSoundUI() {
+    if (el.soundOnSvg) el.soundOnSvg.classList.toggle('hidden', !state.soundEnabled);
+    if (el.soundOffSvg) el.soundOffSvg.classList.toggle('hidden', state.soundEnabled);
+    if (el.soundLabel) el.soundLabel.textContent = state.soundEnabled ? '有声' : '静音';
+    if (el.soundToggle) el.soundToggle.setAttribute('aria-pressed', String(state.soundEnabled));
+  }
+
+  function updateOutlineUI() {
+    if (el.outlineBtnText) el.outlineBtnText.textContent = state.showOutline ? '描红开' : '描红关';
+    if (el.toggleOutlineBtn) el.toggleOutlineBtn.setAttribute('aria-pressed', String(state.showOutline));
+  }
+
   let celebrateTimer = null;
+
+  function resolvePendingStrokeAnim() {
+    if (state.activeStrokeResolve) {
+      const fn = state.activeStrokeResolve;
+      state.activeStrokeResolve = null;
+      fn();
+    }
+  }
 
   function cancelSpeechAndAnim() {
     clearTimeout(celebrateTimer);
+    celebrateTimer = null;
     state.animToken += 1;
     state.animStatus = 'idle';
     state.pauseRequested = false;
     state.resumeIndex = 0;
+    resolvePendingStrokeAnim();
     updatePlayButtonUI();
     stopCurrentAudio();
   }
@@ -653,11 +569,22 @@
     return coarse ? TOUCH_BASE_LENIENCY : DESKTOP_BASE_LENIENCY;
   }
 
-  function getStrokeLeniency(charData, ch, strokeIdx, coarse = isCoarsePointer()) {
-    const median = charData && charData.medians && charData.medians[strokeIdx];
-    const strokeName = getStrokeName(ch, strokeIdx);
-    const vertInfo = analyzeVerticalStroke(median, strokeName);
-    if (vertInfo.isLongVertical) {
+  function buildStrokeVertInfos(charData, ch) {
+    if (!charData || !Array.isArray(charData.medians)) return [];
+    return charData.medians.map((median, idx) =>
+      analyzeVerticalStroke(median, getStrokeName(ch, idx))
+    );
+  }
+
+  function getStrokeLeniency(charData, ch, strokeIdx, coarse = isCoarsePointer(), vertInfos = state.strokeVertInfos) {
+    const vertInfo =
+      Array.isArray(vertInfos) && vertInfos[strokeIdx]
+        ? vertInfos[strokeIdx]
+        : analyzeVerticalStroke(
+            charData && charData.medians && charData.medians[strokeIdx],
+            getStrokeName(ch, strokeIdx)
+          );
+    if (vertInfo && vertInfo.isLongVertical) {
       return coarse ? TOUCH_LONG_VERTICAL_LENIENCY : DESKTOP_LONG_VERTICAL_LENIENCY;
     }
     return getBaseLeniency(coarse);
@@ -769,7 +696,7 @@
     return false;
   }
 
-  function attachLongVerticalQuizHook(writer, charData, ch) {
+  function attachLongVerticalQuizHook(writer, charData, ch, vertInfos = state.strokeVertInfos) {
     const quiz = writer && writer._quiz;
     if (!quiz || quiz._longVerticalHooked || typeof quiz.endUserStroke !== 'function') return;
     quiz._longVerticalHooked = true;
@@ -781,11 +708,13 @@
       const coarse = isCoarsePointer();
 
       if (this._options && charData && charData.medians && idx >= 0 && idx < charData.medians.length) {
-        const strokeName = getStrokeName(ch, idx);
-        const vertInfo = analyzeVerticalStroke(charData.medians[idx], strokeName);
-        if (vertInfo.isLongVertical && activeStroke && Array.isArray(activeStroke.points)) {
+        const vertInfo =
+          Array.isArray(vertInfos) && vertInfos[idx]
+            ? vertInfos[idx]
+            : analyzeVerticalStroke(charData.medians[idx], getStrokeName(ch, idx));
+        if (vertInfo && vertInfo.isLongVertical && activeStroke && Array.isArray(activeStroke.points)) {
           if (matchesLongVerticalFingerStroke(activeStroke.points, vertInfo, coarse)) {
-            this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse);
+            this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse, vertInfos);
             const prevAutoPass = this._options.markStrokeCorrectAfterMisses;
             this._options.markStrokeCorrectAfterMisses = 1;
             try {
@@ -804,7 +733,7 @@
             }
           }
         }
-        this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse);
+        this._options.leniency = getStrokeLeniency(charData, ch, idx, coarse, vertInfos);
       }
       return origEndUserStroke.call(this);
     };
@@ -869,50 +798,83 @@
     }
   }
 
-  function writerCharDataLoader(char, onComplete, onError) {
-    charDataLoader(
-      char,
-      (data) => onComplete(prepareWriterCharData(data)),
-      onError
-    );
-  }
-
   function getCharDataAsync(char) {
     return new Promise((resolve, reject) => {
       charDataLoader(char, resolve, reject);
     });
   }
 
-  function extractHanzi(str) {
-    const matches = (str || '').match(/[\u4e00-\u9fff]/g);
-    return matches ? matches.slice(0, 3) : [];
+  const HANZI_REGEX = (() => {
+    try {
+      return new RegExp('\\p{Script=Han}', 'gu');
+    } catch (_) {
+      return /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g;
+    }
+  })();
+
+  function extractAllHanzi(str) {
+    const matches = String(str || '').match(HANZI_REGEX);
+    return matches || [];
   }
 
-  // 本地存储：读取与保存名字列表
+  function extractHanzi(str) {
+    return extractAllHanzi(str).slice(0, 3);
+  }
+
+  function persistPrefs() {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY_PREFS,
+        JSON.stringify({
+          soundEnabled: state.soundEnabled,
+          isSlow: state.isSlow,
+          showOutline: state.showOutline
+        })
+      );
+    } catch (_) {}
+  }
+
+  // 本地存储：读取与保存名字列表及偏好设置（按 key 独立容错）
   function loadSavedState() {
     try {
       const rawList = localStorage.getItem(STORAGE_KEY_SAVED);
-      if (rawList) {
+      if (rawList !== null) {
         const parsed = JSON.parse(rawList);
         if (Array.isArray(parsed)) {
           state.savedNames = parsed.filter((n) => typeof n === 'string' && extractHanzi(n).length > 0);
+        } else {
+          state.savedNames = [...DEFAULT_SAVED_NAMES];
         }
       } else {
         state.savedNames = [...DEFAULT_SAVED_NAMES];
         localStorage.setItem(STORAGE_KEY_SAVED, JSON.stringify(state.savedNames));
       }
+    } catch (_) {
+      state.savedNames = [...DEFAULT_SAVED_NAMES];
+    }
 
+    try {
       const last = localStorage.getItem(STORAGE_KEY_LAST);
       if (last) {
         const chars = extractHanzi(last);
         if (chars.length > 0) {
           state.nameChars = chars;
-          el.nameInput.value = chars.join('');
+          if (el.nameInput) el.nameInput.value = chars.join('');
         }
       }
-    } catch (_) {
-      state.savedNames = [...DEFAULT_SAVED_NAMES];
-    }
+    } catch (_) {}
+
+    try {
+      const rawPrefs = localStorage.getItem(STORAGE_KEY_PREFS);
+      if (rawPrefs) {
+        const prefs = JSON.parse(rawPrefs);
+        if (prefs && typeof prefs === 'object') {
+          if (typeof prefs.soundEnabled === 'boolean') state.soundEnabled = prefs.soundEnabled;
+          if (typeof prefs.isSlow === 'boolean') state.isSlow = prefs.isSlow;
+          if (typeof prefs.showOutline === 'boolean') state.showOutline = prefs.showOutline;
+        }
+      }
+    } catch (_) {}
   }
 
   function persistSavedNames() {
@@ -921,13 +883,46 @@
     } catch (_) {}
   }
 
-  // 弹窗管理
+  // 弹窗管理与焦点恢复
+  let lastModalOpener = null;
+
+  function rememberModalOpener() {
+    if (document.activeElement && document.activeElement !== document.body) {
+      lastModalOpener = document.activeElement;
+    }
+  }
+
+  function restoreModalOpener() {
+    const target = lastModalOpener;
+    lastModalOpener = null;
+    if (target && typeof target.focus === 'function' && document.contains(target)) {
+      try {
+        target.focus({ preventScroll: true });
+      } catch (_) {
+        target.focus();
+      }
+    }
+  }
+
+  function focusModalInitial(node) {
+    if (!node || typeof node.focus !== 'function') return;
+    requestAnimationFrame(() => {
+      if (document.contains(node)) {
+        try {
+          node.focus({ preventScroll: true });
+        } catch (_) {
+          node.focus();
+        }
+      }
+    });
+  }
+
   function anyModalOpen() {
     return (
-      !el.namePickerModal.classList.contains('hidden') ||
-      (el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) ||
-      !el.showcaseModal.classList.contains('hidden') ||
-      !el.celebrateModal.classList.contains('hidden')
+      Boolean(el.namePickerModal && !el.namePickerModal.classList.contains('hidden')) ||
+      Boolean(el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) ||
+      Boolean(el.showcaseModal && !el.showcaseModal.classList.contains('hidden')) ||
+      Boolean(el.celebrateModal && !el.celebrateModal.classList.contains('hidden'))
     );
   }
 
@@ -1099,10 +1094,12 @@
 
   function openVoicePicker() {
     if (!el.voicePickerModal) return;
+    rememberModalOpener();
     cancelSpeechAndAnim();
     renderVoiceOptions();
     renderSystemVoices();
     el.voicePickerModal.classList.remove('hidden');
+    focusModalInitial(el.closeVoicePickerBtn);
   }
 
   function closeVoicePicker() {
@@ -1111,20 +1108,28 @@
     clearPreviewingButtons();
     stopCurrentAudio();
     el.voicePickerModal.classList.add('hidden');
+    restoreModalOpener();
     syncBoardSizeIfChanged();
   }
 
   function openNamePicker() {
+    if (!el.namePickerModal) return;
+    rememberModalOpener();
     cancelSpeechAndAnim();
     el.nameInput.value = state.nameChars.join('');
     state.chipBufferMode = false;
     renderSavedNames();
     renderPresetChips();
     el.namePickerModal.classList.remove('hidden');
+    focusModalInitial(el.nameInput);
   }
 
-  function closeNamePicker() {
+  function closeNamePicker(options = {}) {
+    if (!el.namePickerModal || el.namePickerModal.classList.contains('hidden')) return;
     el.namePickerModal.classList.add('hidden');
+    if (options.restoreFocus !== false) {
+      restoreModalOpener();
+    }
     syncBoardSizeIfChanged();
   }
 
@@ -1183,23 +1188,30 @@
     });
   }
 
+  let presetChipButtons = [];
+
   function renderPresetChips() {
-    el.presetChips.innerHTML = '';
+    if (!el.presetChips) return;
     const inputChars = extractHanzi(el.nameInput.value);
-    PRESET_CHARS.forEach((ch) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'char-chip';
-      if (inputChars.includes(ch)) {
-        btn.classList.add('in-name');
-      }
-      btn.textContent = ch;
-      btn.title = `点选「${ch}」`;
-      btn.addEventListener('click', () => {
-        btn.blur();
-        handleChipClick(ch);
+    if (presetChipButtons.length === 0) {
+      el.presetChips.innerHTML = '';
+      presetChipButtons = PRESET_CHARS.map((ch) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'char-chip';
+        btn.dataset.char = ch;
+        btn.textContent = ch;
+        btn.title = `点选「${ch}」`;
+        btn.addEventListener('click', () => {
+          btn.blur();
+          handleChipClick(ch);
+        });
+        el.presetChips.appendChild(btn);
+        return btn;
       });
-      el.presetChips.appendChild(btn);
+    }
+    presetChipButtons.forEach((btn) => {
+      btn.classList.toggle('in-name', inputChars.includes(btn.dataset.char));
     });
   }
 
@@ -1227,7 +1239,8 @@
   }
 
   function saveCurrentName() {
-    const chars = extractHanzi(el.nameInput.value);
+    const allChars = extractAllHanzi(el.nameInput.value);
+    const chars = allChars.slice(0, 3);
     if (!chars.length) {
       showToast('请先输入汉字哦', 'warn');
       return;
@@ -1239,7 +1252,18 @@
     playCorrectSound();
     closeNamePicker();
     applyName(chars);
-    showToast(`已保存「${nameStr}」`, 'good');
+    showToast(
+      allChars.length > 3 ? `已保存前 3 个字「${nameStr}」` : `已保存「${nameStr}」`,
+      'good'
+    );
+  }
+
+  function preloadOtherCharsStrokeData(chars = state.nameChars, excludeIdx = state.activeIndex) {
+    if (!window.StrokeLoader || typeof window.StrokeLoader.loadCharData !== 'function') return;
+    chars.forEach((ch, idx) => {
+      if (idx === excludeIdx || !ch) return;
+      window.StrokeLoader.loadCharData(ch).catch(() => {});
+    });
   }
 
   function applyName(chars) {
@@ -1268,7 +1292,7 @@
     loadActiveCharacter();
   }
 
-  // 渲染 3 个汉字大萌卡
+  // 渲染汉字大萌卡
   function renderNameTabs() {
     el.fullNameDisplay.textContent = state.nameChars.join('');
     el.charTabs.innerHTML = '';
@@ -1280,17 +1304,36 @@
 
       const tab = document.createElement('button');
       tab.type = 'button';
-      tab.role = 'tab';
-      tab.ariaSelected = String(isActive);
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', String(isActive));
       tab.className = `char-tab${isActive ? ' active' : ''}${isDone ? ' completed' : ''}`;
-      tab.innerHTML = `
-        <span class="char-tab-glyph">${ch}</span>
-        <span class="char-tab-info">
-          <span class="char-tab-order">第 ${idx + 1} 个字</span>
-          <span class="char-tab-pinyin">${pinyin}</span>
-        </span>
-        <span class="char-tab-star">${isDone ? STAR_FILLED_SVG : STAR_EMPTY_SVG}</span>
-      `;
+
+      const glyphEl = document.createElement('span');
+      glyphEl.className = 'char-tab-glyph';
+      glyphEl.textContent = ch;
+
+      const infoEl = document.createElement('span');
+      infoEl.className = 'char-tab-info';
+
+      const orderEl = document.createElement('span');
+      orderEl.className = 'char-tab-order';
+      orderEl.textContent = `第 ${idx + 1} 个字`;
+
+      const pinyinEl = document.createElement('span');
+      pinyinEl.className = 'char-tab-pinyin';
+      pinyinEl.textContent = pinyin;
+
+      infoEl.appendChild(orderEl);
+      infoEl.appendChild(pinyinEl);
+
+      const starEl = document.createElement('span');
+      starEl.className = 'char-tab-star';
+      starEl.innerHTML = isDone ? STAR_FILLED_SVG : STAR_EMPTY_SVG;
+
+      tab.appendChild(glyphEl);
+      tab.appendChild(infoEl);
+      tab.appendChild(starEl);
+
       tab.addEventListener('click', () => {
         tab.blur();
         if (state.activeIndex === idx) return;
@@ -1346,13 +1389,42 @@
       card.addEventListener('click', () => {
         card.blur();
         if (state.mode !== 'watch') {
-          setMode('watch');
+          setMode('watch', { jumpStrokeIdx: idx });
+        } else {
+          jumpToStroke(idx);
         }
-        jumpToStroke(idx);
       });
 
       el.strokeStepsGrid.appendChild(card);
     });
+  }
+
+  function scrollStrokeCardIntoContainer(card) {
+    const container = el.strokeStepsGrid;
+    if (!container || !card) return;
+    const canScrollX = container.scrollWidth > container.clientWidth + 2;
+    const canScrollY = container.scrollHeight > container.clientHeight + 2;
+    if (!canScrollX && !canScrollY) return;
+
+    const cRect = container.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const nextLeft = canScrollX
+      ? container.scrollLeft + (cardRect.left - cRect.left) - (container.clientWidth - cardRect.width) / 2
+      : container.scrollLeft;
+    const nextTop = canScrollY
+      ? container.scrollTop + (cardRect.top - cRect.top) - (container.clientHeight - cardRect.height) / 2
+      : container.scrollTop;
+
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({
+        left: Math.max(0, nextLeft),
+        top: Math.max(0, nextTop),
+        behavior: prefersReducedMotion() ? 'auto' : 'smooth'
+      });
+    } else {
+      container.scrollLeft = Math.max(0, nextLeft);
+      container.scrollTop = Math.max(0, nextTop);
+    }
   }
 
   function highlightStrokeStep(idx) {
@@ -1367,7 +1439,7 @@
       el.strokeProgressLabel.textContent = `第 ${idx + 1} / ${state.charData.strokes.length} 画 · ${strokeName}`;
       const activeCard = cards[idx];
       if (activeCard) {
-        activeCard.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        scrollStrokeCardIntoContainer(activeCard);
       }
     }
   }
@@ -1384,13 +1456,32 @@
     return state.isSlow ? 0.7 : 1.5;
   }
 
+  function destroyCurrentWriter() {
+    if (state.writer) {
+      try {
+        if (typeof state.writer.cancelQuiz === 'function') {
+          state.writer.cancelQuiz();
+        }
+      } catch (_) {}
+      state.writer = null;
+    }
+    state.loadedChar = '';
+    if (el.hanziTarget) {
+      el.hanziTarget.innerHTML = '';
+    }
+  }
+
   // 加载当前选中的汉字（支持尺寸变化重绘时保留测验进度）
   async function loadActiveCharacter(options = {}) {
     const resumeStrokeIdx =
       typeof options.resumeStrokeIdx === 'number' && options.resumeStrokeIdx > 0
         ? options.resumeStrokeIdx
         : 0;
+    const jumpStrokeIdx =
+      typeof options.jumpStrokeIdx === 'number' ? options.jumpStrokeIdx : null;
+
     cancelSpeechAndAnim();
+    destroyCurrentWriter();
     state.loadToken += 1;
     const myToken = state.loadToken;
     const ch = state.nameChars[state.activeIndex];
@@ -1401,14 +1492,16 @@
     el.currentTip.textContent = meta.tip;
     el.nextCharBtn.classList.add('hidden');
     el.strokeProgressLabel.textContent = '准备中...';
-    el.hanziTarget.innerHTML = '';
     state.currentStepIndex = -1;
 
     try {
       const charData = await getCharDataAsync(ch);
       if (myToken !== state.loadToken) return;
 
+      const preparedData = prepareWriterCharData(charData);
       state.charData = charData;
+      state.preparedCharData = preparedData;
+      state.strokeVertInfos = buildStrokeVertInfos(charData, ch);
       renderStrokeSteps(charData);
 
       el.hanziTarget.innerHTML = '';
@@ -1434,8 +1527,9 @@
         highlightColor: '#FF7477',
         showHintAfterMisses: 2,
         highlightOnComplete: true,
-        charDataLoader: writerCharDataLoader
+        charDataLoader: (_char, onComplete) => onComplete(preparedData)
       });
+      state.loadedChar = ch;
 
       const createdSvg = el.hanziTarget.querySelector('svg');
       if (createdSvg && !createdSvg.getAttribute('viewBox')) {
@@ -1443,11 +1537,21 @@
       }
 
       if (state.mode === 'watch') {
-        playFullAnimation();
+        if (jumpStrokeIdx !== null) {
+          jumpToStroke(jumpStrokeIdx);
+        } else {
+          playFullAnimation();
+        }
       } else {
         startQuiz(resumeStrokeIdx);
       }
+
+      preloadOtherCharsStrokeData(state.nameChars, state.activeIndex);
     } catch (_) {
+      if (myToken !== state.loadToken) return;
+      state.charData = null;
+      state.preparedCharData = null;
+      state.strokeVertInfos = [];
       el.strokeProgressLabel.textContent = '暂无笔画数据';
       showToast(`暂时找不到「${ch}」的笔画数据`, 'warn');
     }
@@ -1459,9 +1563,26 @@
         resolve();
         return;
       }
-      state.writer.animateStroke(idx, {
-        onComplete: resolve
-      });
+      resolvePendingStrokeAnim();
+      let settled = false;
+      const timer = setTimeout(() => finish(), state.isSlow ? 5000 : 3000);
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (state.activeStrokeResolve === finish) {
+          state.activeStrokeResolve = null;
+        }
+        resolve();
+      };
+      state.activeStrokeResolve = finish;
+      try {
+        state.writer.animateStroke(idx, {
+          onComplete: finish
+        });
+      } catch (_) {
+        finish();
+      }
     });
   }
 
@@ -1592,10 +1713,22 @@
     if (!state.writer || !state.charData) return;
     const charData = state.charData;
     const writer = state.writer;
+    const vertInfos = state.strokeVertInfos;
+    const myLoadToken = state.loadToken;
     const total = charData.strokes.length;
     const clampedStart = Math.max(0, Math.min(total - 1, startStrokeIdx));
     const ch = state.nameChars[state.activeIndex];
     const startStrokeName = getStrokeName(ch, clampedStart);
+
+    try {
+      if (typeof writer.cancelQuiz === 'function') {
+        writer.cancelQuiz();
+      }
+    } catch (_) {}
+
+    const isCurrent = () =>
+      state.writer === writer && state.loadToken === myLoadToken && state.mode === 'write';
+
     highlightStrokeStep(clampedStart);
     el.nextCharBtn.classList.add('hidden');
     setBearMood(
@@ -1610,18 +1743,19 @@
       writer.hideOutline();
     }
 
-    const initialLeniency = getStrokeLeniency(charData, ch, clampedStart);
+    const initialLeniency = getStrokeLeniency(charData, ch, clampedStart, isCoarsePointer(), vertInfos);
 
     const quizPromise = writer.quiz({
       quizStartStrokeNum: clampedStart,
       leniency: initialLeniency,
       drawingWidth: getDrawingWidth(),
       onCorrectStroke: (strokeData) => {
+        if (!isCurrent()) return;
         playCorrectSound();
         const nextIdx = strokeData.strokeNum + 1;
         if (nextIdx < total) {
           if (writer._options) {
-            writer._options.leniency = getStrokeLeniency(charData, ch, nextIdx);
+            writer._options.leniency = getStrokeLeniency(charData, ch, nextIdx, isCoarsePointer(), vertInfos);
           }
           const nextName = getStrokeName(ch, nextIdx);
           highlightStrokeStep(nextIdx);
@@ -1629,9 +1763,13 @@
           showToast('这一笔真漂亮！', 'good');
         }
       },
-      onMistake: () => {
+      onMistake: (strokeData) => {
+        if (!isCurrent()) return;
         playWrongSound();
-        const idx = Math.max(0, state.currentStepIndex);
+        const idx =
+          strokeData && typeof strokeData.strokeNum === 'number'
+            ? strokeData.strokeNum
+            : Math.max(0, state.currentStepIndex);
         const sName = getStrokeName(ch, idx);
         const isVert = VERTICAL_STROKE_NAMES.has(sName);
         setBearMood(
@@ -1645,6 +1783,7 @@
         showToast(isVert ? '从上往下慢慢画竖哦' : '看看闪光提示再试一次', 'warn');
       },
       onComplete: () => {
+        if (!isCurrent()) return;
         playSuccessFanfare();
         highlightStrokeStep(total - 1);
         el.strokeProgressLabel.textContent = `写完啦！（共 ${total} 画）`;
@@ -1659,7 +1798,9 @@
           el.celebrateName.textContent = state.nameChars.join('');
           clearTimeout(celebrateTimer);
           celebrateTimer = setTimeout(() => {
-            el.celebrateModal.classList.remove('hidden');
+            if (state.loadToken === myLoadToken) {
+              openCelebrate();
+            }
           }, 550);
         } else {
           const nextIdx = findNextPendingChar();
@@ -1669,16 +1810,15 @@
       }
     });
 
+    attachLongVerticalQuizHook(writer, charData, ch, vertInfos);
     if (quizPromise && typeof quizPromise.then === 'function') {
       quizPromise
         .then(() => {
           if (state.writer === writer) {
-            attachLongVerticalQuizHook(writer, charData, ch);
+            attachLongVerticalQuizHook(writer, charData, ch, vertInfos);
           }
         })
         .catch(() => {});
-    } else {
-      attachLongVerticalQuizHook(writer, charData, ch);
     }
   }
 
@@ -1689,7 +1829,7 @@
     return any !== -1 ? any : (state.activeIndex + 1) % state.nameChars.length;
   }
 
-  function setMode(mode) {
+  function setMode(mode, options = {}) {
     state.mode = mode;
     const isWatch = mode === 'watch';
     el.modeWatchBtn.classList.toggle('active', isWatch);
@@ -1698,18 +1838,59 @@
     el.modeWriteBtn.setAttribute('aria-selected', String(!isWatch));
     el.watchControls.classList.toggle('hidden', !isWatch);
     el.writeControls.classList.toggle('hidden', isWatch);
-    loadActiveCharacter();
+
+    const ch = state.nameChars[state.activeIndex];
+    const currentSize = getBoardSize();
+    const canReuseWriter =
+      state.writer &&
+      state.charData &&
+      state.loadedChar === ch &&
+      Math.abs(currentSize - state.lastBoardWidth) < 8;
+
+    if (canReuseWriter) {
+      cancelSpeechAndAnim();
+      try {
+        if (typeof state.writer.cancelQuiz === 'function') {
+          state.writer.cancelQuiz();
+        }
+      } catch (_) {}
+      el.nextCharBtn.classList.add('hidden');
+      if (isWatch) {
+        state.writer.showOutline();
+        if (typeof options.jumpStrokeIdx === 'number') {
+          jumpToStroke(options.jumpStrokeIdx);
+        } else {
+          playFullAnimation();
+        }
+      } else {
+        startQuiz(typeof options.resumeStrokeIdx === 'number' ? options.resumeStrokeIdx : 0);
+      }
+      return;
+    }
+
+    loadActiveCharacter(options);
   }
 
   function updateSpeedUI() {
     el.speedSlowSvg.classList.toggle('hidden', !state.isSlow);
     el.speedFastSvg.classList.toggle('hidden', state.isSlow);
     el.speedToggleLabel.textContent = state.isSlow ? '慢读报笔顺' : '快看笔顺';
+    if (el.speedToggleBtn) {
+      el.speedToggleBtn.setAttribute('aria-pressed', String(state.isSlow));
+    }
   }
 
   // 连看 3 个字弹窗
+  let showcaseToken = 0;
+  let showcaseTimer = null;
+
   function openShowcase() {
+    if (!el.showcaseModal) return;
+    rememberModalOpener();
     cancelSpeechAndAnim();
+    showcaseToken += 1;
+    clearTimeout(showcaseTimer);
+    showcaseTimer = null;
     el.showcaseModal.classList.remove('hidden');
     el.showcaseGrid.innerHTML = '';
     state.showcaseWriters = [];
@@ -1729,33 +1910,88 @@
         strokeColor: '#3E2E26',
         radicalColor: '#FF7477',
         outlineColor: '#EBD9C5',
-        charDataLoader
+        charDataLoader,
+        onLoadCharDataError: () => {
+          box.dataset.loadFailed = '1';
+        }
       });
-      state.showcaseWriters.push(writer);
+      const svg = box.querySelector('svg');
+      if (svg && !svg.getAttribute('viewBox')) {
+        svg.setAttribute('viewBox', '0 0 144 144');
+      }
+      state.showcaseWriters.push({ writer, box });
     }
+    focusModalInitial(el.closeShowcaseBtn);
     playShowcaseSequence();
   }
 
   function playShowcaseSequence() {
-    const writers = state.showcaseWriters;
-    writers.forEach((w) => w.hideCharacter());
+    showcaseToken += 1;
+    clearTimeout(showcaseTimer);
+    showcaseTimer = null;
+    const myToken = showcaseToken;
+    const items = state.showcaseWriters;
+    items.forEach(({ writer }) => {
+      try {
+        writer.hideCharacter();
+      } catch (_) {}
+    });
     let idx = 0;
     function next() {
-      if (idx >= writers.length || el.showcaseModal.classList.contains('hidden')) return;
-      writers[idx].animateCharacter({
+      if (myToken !== showcaseToken || idx >= items.length || el.showcaseModal.classList.contains('hidden')) {
+        return;
+      }
+      const { writer, box } = items[idx];
+      if (box && box.dataset.loadFailed === '1') {
+        idx += 1;
+        showcaseTimer = setTimeout(next, 120);
+        return;
+      }
+      writer.animateCharacter({
         onComplete: () => {
+          if (myToken !== showcaseToken) return;
           idx += 1;
-          setTimeout(next, 240);
+          showcaseTimer = setTimeout(next, 240);
         }
       });
     }
     next();
   }
 
-  // 礼花庆祝动画
+  function closeShowcase() {
+    if (!el.showcaseModal || el.showcaseModal.classList.contains('hidden')) return;
+    showcaseToken += 1;
+    clearTimeout(showcaseTimer);
+    showcaseTimer = null;
+    state.showcaseWriters = [];
+    if (el.showcaseGrid) el.showcaseGrid.innerHTML = '';
+    el.showcaseModal.classList.add('hidden');
+    restoreModalOpener();
+    syncBoardSizeIfChanged();
+  }
+
+  // 礼花庆祝动画与弹窗
+  let confettiRafId = null;
+
+  function stopConfetti() {
+    if (confettiRafId !== null) {
+      cancelAnimationFrame(confettiRafId);
+      confettiRafId = null;
+    }
+    if (el.confettiCanvas) {
+      const ctx = el.confettiCanvas.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, el.confettiCanvas.width, el.confettiCanvas.height);
+      }
+    }
+  }
+
   function launchConfetti() {
+    stopConfetti();
+    if (prefersReducedMotion() || !el.confettiCanvas) return;
     const canvas = el.confettiCanvas;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
@@ -1788,12 +2024,32 @@
       });
       frame += 1;
       if (frame < 160) {
-        requestAnimationFrame(tick);
+        confettiRafId = requestAnimationFrame(tick);
       } else {
+        confettiRafId = null;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
     }
-    requestAnimationFrame(tick);
+    confettiRafId = requestAnimationFrame(tick);
+  }
+
+  function openCelebrate() {
+    if (!el.celebrateModal) return;
+    rememberModalOpener();
+    el.celebrateModal.classList.remove('hidden');
+    focusModalInitial(el.practiceAgainBtn || el.dismissCelebrateBtn || el.closeCelebrateBtn);
+  }
+
+  function closeCelebrate(options = {}) {
+    clearTimeout(celebrateTimer);
+    celebrateTimer = null;
+    stopConfetti();
+    if (!el.celebrateModal || el.celebrateModal.classList.contains('hidden')) return;
+    el.celebrateModal.classList.add('hidden');
+    if (options.restoreFocus !== false) {
+      restoreModalOpener();
+    }
+    syncBoardSizeIfChanged();
   }
 
   // 事件绑定
@@ -1830,12 +2086,14 @@
         }
       });
     }
-    if ('speechSynthesis' in window) {
-      const handleVoicesChanged = () => {
-        if (el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) {
-          renderSystemVoices();
-        }
-      };
+    const handleVoicesChanged = () => {
+      if (el.voicePickerModal && !el.voicePickerModal.classList.contains('hidden')) {
+        renderSystemVoices();
+      }
+    };
+    if (window.VoiceEngine && typeof window.VoiceEngine.onSystemVoicesChanged === 'function') {
+      window.VoiceEngine.onSystemVoicesChanged(handleVoicesChanged);
+    } else if ('speechSynthesis' in window) {
       if (typeof window.speechSynthesis.addEventListener === 'function') {
         window.speechSynthesis.addEventListener('voiceschanged', handleVoicesChanged);
       } else {
@@ -1843,27 +2101,30 @@
       }
     }
 
-    el.applyNameBtn.addEventListener('click', () => {
+    const submitNameInput = () => {
       state.chipBufferMode = false;
-      const chars = extractHanzi(el.nameInput.value);
+      const allChars = extractAllHanzi(el.nameInput.value);
+      const chars = allChars.slice(0, 3);
       if (!chars.length) {
         showToast('请输入至少 1 个汉字哦', 'warn');
         return;
       }
-      closeNamePicker();
+      closeNamePicker({ restoreFocus: false });
       applyName(chars);
-    });
+      if (allChars.length > 3) {
+        showToast('最多支持 3 个汉字，已取前 3 个哦');
+      }
+    };
+
+    el.applyNameBtn.addEventListener('click', submitNameInput);
 
     el.saveNameBtn.addEventListener('click', saveCurrentName);
 
     el.nameInput.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') {
-        state.chipBufferMode = false;
-        const chars = extractHanzi(el.nameInput.value);
-        if (chars.length) {
-          closeNamePicker();
-          applyName(chars);
-        }
+        e.preventDefault();
+        submitNameInput();
       }
     });
 
@@ -1906,28 +2167,80 @@
       togglePlayPause();
     });
 
+    const isEditableFocused = () => {
+      const activeTag = document.activeElement ? document.activeElement.tagName : '';
+      return activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT';
+    };
+
     // 空格键播放 / 写完当前一笔后暂停（捕获阶段拦截，避免误触其他按钮）
     const isSpaceWatchActive = (e) => {
       if (e.code !== 'Space' && e.key !== ' ') return false;
-      const activeTag = document.activeElement ? document.activeElement.tagName : '';
-      if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return false;
+      if (isEditableFocused()) return false;
       if (anyModalOpen()) return false;
       return state.mode === 'watch';
+    };
+
+    const triggerHintStroke = () => {
+      if (!state.writer || !state.charData) return;
+      const quizActive = Boolean(state.writer._quiz && state.writer._quiz._isActive);
+      if (!quizActive) {
+        showToast('这个字已经写完啦，点“重新写”再练一次哦');
+        return;
+      }
+      const idx =
+        typeof state.writer._quiz._currentStrokeIndex === 'number'
+          ? state.writer._quiz._currentStrokeIndex
+          : Math.max(0, state.currentStepIndex);
+      if (idx >= 0 && idx < state.charData.strokes.length) {
+        const ch = state.nameChars[state.activeIndex];
+        const sName = getStrokeName(ch, idx);
+        state.writer.highlightStroke(idx);
+        setBearMood('talking', `第 ${idx + 1} 笔：${sName}`, '跟着红线画这一笔吧！', 1200);
+        speakStrokeSync(sName);
+      }
     };
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeNamePicker();
         closeVoicePicker();
-        el.showcaseModal.classList.add('hidden');
-        el.celebrateModal.classList.add('hidden');
+        closeShowcase();
+        closeCelebrate();
         return;
       }
-      if (!isSpaceWatchActive(e)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.repeat) return;
-      togglePlayPause();
+      if (isSpaceWatchActive(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return;
+        togglePlayPause();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || isEditableFocused() || anyModalOpen()) {
+        return;
+      }
+      if (state.mode === 'watch') {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          const target = state.currentStepIndex <= 0 ? 0 : state.currentStepIndex - 1;
+          jumpToStroke(target);
+        } else if (e.key === 'ArrowRight' && state.charData) {
+          e.preventDefault();
+          const total = state.charData.strokes.length;
+          const target = state.currentStepIndex < 0 ? 0 : Math.min(total - 1, state.currentStepIndex + 1);
+          jumpToStroke(target);
+        } else if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          playFullAnimation();
+        }
+      } else if (state.mode === 'write') {
+        if (e.key === 'h' || e.key === 'H') {
+          e.preventDefault();
+          triggerHintStroke();
+        } else if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          if (state.writer) startQuiz();
+        }
+      }
     }, true);
 
     window.addEventListener('keyup', (e) => {
@@ -1953,9 +2266,19 @@
     el.speedToggleBtn.addEventListener('click', () => {
       el.speedToggleBtn.blur();
       state.isSlow = !state.isSlow;
+      persistPrefs();
       updateSpeedUI();
+      if (state.writer && state.writer._options) {
+        state.writer._options.strokeAnimationSpeed = getAnimSpeedValue();
+        state.writer._options.delayBetweenStrokes = state.isSlow ? 320 : 140;
+      }
       if (state.mode === 'watch') {
-        loadActiveCharacter();
+        if (state.writer && state.charData) {
+          cancelSpeechAndAnim();
+          playFullAnimation();
+        } else {
+          loadActiveCharacter();
+        }
       }
     });
 
@@ -1966,21 +2289,14 @@
 
     el.hintStrokeBtn.addEventListener('click', () => {
       el.hintStrokeBtn.blur();
-      if (!state.writer || !state.charData) return;
-      const idx = Math.max(0, state.currentStepIndex);
-      if (idx < state.charData.strokes.length) {
-        const ch = state.nameChars[state.activeIndex];
-        const sName = getStrokeName(ch, idx);
-        state.writer.highlightStroke(idx);
-        setBearMood('talking', `第 ${idx + 1} 笔：${sName}`, '跟着红线画这一笔吧！', 1200);
-        speakStrokeSync(sName);
-      }
+      triggerHintStroke();
     });
 
     el.toggleOutlineBtn.addEventListener('click', () => {
       el.toggleOutlineBtn.blur();
       state.showOutline = !state.showOutline;
-      el.outlineBtnText.textContent = state.showOutline ? '描红开' : '描红关';
+      persistPrefs();
+      updateOutlineUI();
       if (state.writer) {
         if (state.showOutline) state.writer.showOutline();
         else state.writer.hideOutline();
@@ -1997,34 +2313,36 @@
     el.soundToggle.addEventListener('click', () => {
       el.soundToggle.blur();
       state.soundEnabled = !state.soundEnabled;
-      el.soundOnSvg.classList.toggle('hidden', !state.soundEnabled);
-      el.soundOffSvg.classList.toggle('hidden', state.soundEnabled);
-      el.soundLabel.textContent = state.soundEnabled ? '有声' : '静音';
+      persistPrefs();
+      updateSoundUI();
       if (!state.soundEnabled) stopCurrentAudio();
     });
 
-    el.closeShowcaseBtn.addEventListener('click', () => {
-      el.showcaseModal.classList.add('hidden');
-      syncBoardSizeIfChanged();
-    });
+    el.closeShowcaseBtn.addEventListener('click', closeShowcase);
     el.showcaseModal.addEventListener('click', (e) => {
-      if (e.target === el.showcaseModal) {
-        el.showcaseModal.classList.add('hidden');
-        syncBoardSizeIfChanged();
-      }
+      if (e.target === el.showcaseModal) closeShowcase();
     });
     el.replayShowcaseBtn.addEventListener('click', playShowcaseSequence);
 
     el.practiceAgainBtn.addEventListener('click', () => {
-      el.celebrateModal.classList.add('hidden');
+      closeCelebrate({ restoreFocus: false });
       state.completed.clear();
       state.activeIndex = 0;
       renderNameTabs();
       loadActiveCharacter();
     });
 
+    if (el.dismissCelebrateBtn) {
+      el.dismissCelebrateBtn.addEventListener('click', () => closeCelebrate());
+    }
+    if (el.celebrateModal) {
+      el.celebrateModal.addEventListener('click', (e) => {
+        if (e.target === el.celebrateModal) closeCelebrate();
+      });
+    }
+
     el.closeCelebrateBtn.addEventListener('click', () => {
-      el.celebrateModal.classList.add('hidden');
+      closeCelebrate({ restoreFocus: false });
       openNamePicker();
     });
 
@@ -2045,6 +2363,8 @@
       const coarseMql = window.matchMedia('(pointer: coarse)');
       if (typeof coarseMql.addEventListener === 'function') {
         coarseMql.addEventListener('change', updatePlayButtonUI);
+      } else if (typeof coarseMql.addListener === 'function') {
+        coarseMql.addListener(updatePlayButtonUI);
       }
     }
   }
@@ -2070,6 +2390,8 @@
   initPinyinEngine();
   updateVoiceButtonUI();
   preloadVoiceChars(state.nameChars);
+  updateSoundUI();
+  updateOutlineUI();
   updateSpeedUI();
   updatePlayButtonUI();
   renderSavedNames();

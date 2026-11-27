@@ -2,7 +2,10 @@
   'use strict';
 
   const CACHE_PREFIX = 'xiezi_stroke_v1_';
-  const FETCH_TIMEOUT_MS = 6500;
+  const CACHE_INDEX_KEY = 'xiezi_stroke_lru_v1';
+  const MAX_MEMORY_CACHE = 200;
+  const MAX_PERSISTED_CHARS = 120;
+  const FETCH_TIMEOUT_MS = 4500;
   const IDS_FETCH_TIMEOUT_MS = 10000;
   const MAX_IDS_DEPTH = 3;
 
@@ -123,7 +126,7 @@
     '氵', '亻', '扌', '木', '王', '火', '禾', '女', '忄', '讠', '钅', '纟',
     '阝', '礻', '衤', '犭', '冫', '彳', '弓', '巾', '日', '目', '口', '土',
     '石', '虫', '车', '马', '鱼', '鸟', '立', '歹', '舟', '贝', '见', '饣',
-    '月', '山', '米', '足', '耳', '舟', '车', '革', '骨', '牛', '牜', '片',
+    '月', '山', '米', '足', '耳', '革', '骨', '牛', '牜', '片',
     '牙', '矛', '矢', '豆', '酉', '采', '里', '身', '角', '言'
   ]);
 
@@ -189,36 +192,134 @@
     return true;
   }
 
-  function readSessionCache(ch) {
+  function isOffline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
+  function getMemoryCache(ch) {
+    if (!charCache.has(ch)) return null;
+    const val = charCache.get(ch);
+    // Refresh LRU order
+    charCache.delete(ch);
+    charCache.set(ch, val);
+    return val;
+  }
+
+  function setMemoryCache(ch, data) {
+    if (charCache.has(ch)) {
+      charCache.delete(ch);
+    } else if (charCache.size >= MAX_MEMORY_CACHE) {
+      const oldestKey = charCache.keys().next().value;
+      if (oldestKey !== undefined) charCache.delete(oldestKey);
+    }
+    charCache.set(ch, data);
+  }
+
+  function getPersistStorage() {
     try {
-      if (typeof sessionStorage === 'undefined') return null;
-      const raw = sessionStorage.getItem(CACHE_PREFIX + ch);
-      if (!raw) return null;
+      if (typeof localStorage !== 'undefined') return localStorage;
+    } catch (_) {}
+    try {
+      if (typeof sessionStorage !== 'undefined') return sessionStorage;
+    } catch (_) {}
+    return null;
+  }
+
+  function readLruIndex(storage) {
+    try {
+      const raw = storage.getItem(CACHE_INDEX_KEY);
+      if (!raw) return [];
       const parsed = JSON.parse(raw);
-      return isValidCharData(parsed) ? parsed : null;
+      return Array.isArray(parsed) ? parsed.filter((c) => typeof c === 'string' && c.length > 0) : [];
     } catch (_) {
-      return null;
+      return [];
     }
   }
 
-  function writeSessionCache(ch, data) {
+  function writeLruIndex(storage, list) {
     try {
-      if (typeof sessionStorage === 'undefined') return;
-      const payload = {
-        strokes: data.strokes,
-        medians: data.medians,
-        source: data.source || 'remote'
-      };
-      if (Array.isArray(data.radStrokes)) {
-        payload.radStrokes = data.radStrokes;
+      storage.setItem(CACHE_INDEX_KEY, JSON.stringify(list));
+    } catch (_) {}
+  }
+
+  function readPersistedCache(ch) {
+    const storages = [];
+    try {
+      if (typeof localStorage !== 'undefined') storages.push(localStorage);
+    } catch (_) {}
+    try {
+      if (typeof sessionStorage !== 'undefined') storages.push(sessionStorage);
+    } catch (_) {}
+
+    for (let i = 0; i < storages.length; i += 1) {
+      const storage = storages[i];
+      try {
+        const raw = storage.getItem(CACHE_PREFIX + ch);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (isValidCharData(parsed)) {
+          // Touch LRU order in primary storage
+          if (i === 0) {
+            const idx = readLruIndex(storage).filter((k) => k !== ch);
+            idx.push(ch);
+            writeLruIndex(storage, idx);
+          }
+          return parsed;
+        }
+        storage.removeItem(CACHE_PREFIX + ch);
+      } catch (_) {
+        // Ignore storage read/parse errors
       }
-      sessionStorage.setItem(CACHE_PREFIX + ch, JSON.stringify(payload));
-    } catch (_) {
-      // Ignore quota / private mode errors
+    }
+    return null;
+  }
+
+  function writePersistedCache(ch, data) {
+    const storage = getPersistStorage();
+    if (!storage) return;
+    const payload = {
+      strokes: data.strokes,
+      medians: data.medians,
+      source: data.source || 'remote'
+    };
+    if (Array.isArray(data.radStrokes)) {
+      payload.radStrokes = data.radStrokes;
+    }
+    const serialized = JSON.stringify(payload);
+    let idx = readLruIndex(storage).filter((k) => k !== ch);
+
+    while (idx.length >= MAX_PERSISTED_CHARS) {
+      const evict = idx.shift();
+      try {
+        storage.removeItem(CACHE_PREFIX + evict);
+      } catch (_) {}
+    }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        storage.setItem(CACHE_PREFIX + ch, serialized);
+        idx.push(ch);
+        writeLruIndex(storage, idx);
+        return;
+      } catch (_) {
+        // Quota exceeded: evict oldest quarter of cached chars and retry
+        const dropCount = Math.max(1, Math.ceil(idx.length / 4));
+        if (idx.length === 0) return;
+        for (let k = 0; k < dropCount && idx.length > 0; k += 1) {
+          const evict = idx.shift();
+          try {
+            storage.removeItem(CACHE_PREFIX + evict);
+          } catch (_) {}
+        }
+        writeLruIndex(storage, idx);
+      }
     }
   }
 
-  async function fetchWithTimeout(url, timeoutMs) {
+  async function fetchBodyWithTimeout(url, mode, timeoutMs) {
+    if (typeof fetch !== 'function') {
+      return { ok: false, status: 0, body: null };
+    }
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     let timer = null;
     if (controller) {
@@ -226,30 +327,30 @@
     }
     try {
       const res = await fetch(url, controller ? { signal: controller.signal } : undefined);
-      return res;
+      if (!res.ok) {
+        return { ok: false, status: res.status || 0, body: null };
+      }
+      const body = mode === 'json' ? await res.json() : await res.text();
+      return { ok: true, status: res.status || 200, body };
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
 
   async function fetchFromMirrors(urls, mode = 'json', timeoutMs = FETCH_TIMEOUT_MS, skipMirrorsOn404 = true) {
-    let lastError = null;
+    if (isOffline()) return null;
     for (let i = 0; i < urls.length; i += 1) {
       try {
-        const res = await fetchWithTimeout(urls[i], timeoutMs);
-        if (res.ok) {
-          return mode === 'json' ? await res.json() : await res.text();
+        const result = await fetchBodyWithTimeout(urls[i], mode, timeoutMs);
+        if (result.ok) {
+          return result.body;
         }
-        if (res.status === 404 && skipMirrorsOn404) {
+        if (result.status === 404 && skipMirrorsOn404) {
           return null;
         }
-        lastError = new Error(`HTTP ${res.status}`);
-      } catch (err) {
-        lastError = err;
+      } catch (_) {
+        // Try next mirror
       }
-    }
-    if (lastError) {
-      return null;
     }
     return null;
   }
@@ -535,7 +636,10 @@
       idsMapPromise = (async () => {
         const text = await fetchFromMirrors(BABELSTONE_IDS_URLS, 'text', IDS_FETCH_TIMEOUT_MS, false);
         const map = new Map();
-        if (!text) return map;
+        if (!text) {
+          idsMapPromise = null;
+          return map;
+        }
         const lines = text.split(/\r?\n/);
         for (let i = 0; i < lines.length; i += 1) {
           const line = lines[i];
@@ -547,6 +651,9 @@
           if (ch && seq) {
             map.set(ch, seq);
           }
+        }
+        if (map.size === 0) {
+          idsMapPromise = null;
         }
         return map;
       })();
@@ -760,7 +867,7 @@
     // Tier 3: Live upstream parsimonhi/animCJK SVGs (svgsZhHans)
     const cp = ch.codePointAt(0);
     if (cp) {
-      const svgText = await fetchFromMirrors(ACJK_SVG_URLS(cp), 'text', FETCH_TIMEOUT_MS, true);
+      const svgText = await fetchFromMirrors(ACJK_SVG_URLS(cp), 'text', FETCH_TIMEOUT_MS, false);
       if (svgText) {
         const parsed = parseAnimCjkSvg(svgText, cp);
         if (parsed) return parsed;
@@ -768,6 +875,44 @@
     }
 
     return null;
+  }
+
+  async function resolveDirectCached(ch) {
+    const mem = getMemoryCache(ch);
+    if (mem) return mem;
+
+    const persisted = readPersistedCache(ch);
+    if (persisted) {
+      setMemoryCache(ch, persisted);
+      return persisted;
+    }
+
+    if (inFlight.has(ch)) {
+      try {
+        return await inFlight.get(ch);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    const task = (async () => {
+      const data = await resolveDirectTiers(ch);
+      if (isValidCharData(data)) {
+        setMemoryCache(ch, data);
+        if (data.source !== 'builtin') {
+          writePersistedCache(ch, data);
+        }
+        return data;
+      }
+      return null;
+    })();
+
+    inFlight.set(ch, task);
+    try {
+      return await task;
+    } finally {
+      inFlight.delete(ch);
+    }
   }
 
   async function resolveIdsNode(node, depth, visited) {
@@ -778,30 +923,22 @@
       const normCh = RADICAL_NORMALIZE[rawCh] || rawCh;
       if (visited.has(normCh)) return null;
 
-      if (charCache.has(normCh)) return charCache.get(normCh);
-      const direct = await resolveDirectTiers(normCh);
-      if (direct) {
-        charCache.set(normCh, direct);
-        return direct;
-      }
+      const direct = await resolveDirectCached(normCh);
+      if (direct) return direct;
+
       if (rawCh !== normCh) {
-        const rawDirect = await resolveDirectTiers(rawCh);
-        if (rawDirect) {
-          charCache.set(rawCh, rawDirect);
-          return rawDirect;
-        }
+        const rawDirect = await resolveDirectCached(rawCh);
+        if (rawDirect) return rawDirect;
       }
       if (depth >= MAX_IDS_DEPTH) return null;
       return composeViaIds(normCh, depth + 1, visited);
     }
 
     const slots = getSlotsForOp(node.op, node.children);
-    const resolvedChildren = [];
-    for (let i = 0; i < node.children.length; i += 1) {
-      const childData = await resolveIdsNode(node.children[i], depth + 1, visited);
-      if (!childData) return null;
-      resolvedChildren.push(childData);
-    }
+    const resolvedChildren = await Promise.all(
+      node.children.map((child) => resolveIdsNode(child, depth + 1, visited))
+    );
+    if (resolvedChildren.some((c) => !c)) return null;
 
     if (node.op === '⿾' && resolvedChildren.length === 1) {
       const bbox = computeCharBbox(resolvedChildren[0]);
@@ -866,13 +1003,14 @@
       throw new Error('Empty character');
     }
 
-    if (charCache.has(ch)) {
-      return charCache.get(ch);
+    const mem = getMemoryCache(ch);
+    if (mem) {
+      return mem;
     }
 
-    const cached = readSessionCache(ch);
+    const cached = readPersistedCache(ch);
     if (cached) {
-      charCache.set(ch, cached);
+      setMemoryCache(ch, cached);
       return cached;
     }
 
@@ -888,9 +1026,9 @@
       if (!isValidCharData(data)) {
         throw new Error(`No stroke data found for "${ch}"`);
       }
-      charCache.set(ch, data);
+      setMemoryCache(ch, data);
       if (data.source !== 'builtin') {
-        writeSessionCache(ch, data);
+        writePersistedCache(ch, data);
       }
       return data;
     })();
@@ -950,15 +1088,21 @@
     if (getPinyinApi()) {
       return Promise.resolve(true);
     }
+    if (isOffline()) {
+      return Promise.resolve(false);
+    }
     if (!pinyinPromise) {
       pinyinPromise = (async () => {
         if (typeof document === 'undefined') {
-          return Boolean(getPinyinApi());
+          const ok = Boolean(getPinyinApi());
+          if (!ok) pinyinPromise = null;
+          return ok;
         }
         for (let i = 0; i < PINYIN_PRO_URLS.length; i += 1) {
           const ok = await loadScriptOnce(PINYIN_PRO_URLS[i]);
           if (ok) return true;
         }
+        pinyinPromise = null;
         return false;
       })();
     }
@@ -1027,7 +1171,24 @@
     getCharPinyinNum,
     getNamePinyinNums,
     preloadPinyinPro,
-    ensurePinyinReady
+    ensurePinyinReady,
+    _internals: {
+      isValidCharData,
+      parseSvgPathToAbsolute,
+      transformSvgPath,
+      parseAnimCjkSvg,
+      parseIdsAst,
+      ensureIdsMap,
+      fetchBodyWithTimeout,
+      MAX_MEMORY_CACHE,
+      MAX_PERSISTED_CHARS,
+      clearCaches: () => {
+        charCache.clear();
+        inFlight.clear();
+        idsMapPromise = null;
+        pinyinPromise = null;
+      }
+    }
   };
 
   if (typeof window !== 'undefined') {
